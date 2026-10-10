@@ -26,8 +26,8 @@ Usage:
   atdd-flow bind <address> [--application <application>] --address <native-address> [--session <name>] [--agent <executable>] [--worktree <path>] [--wake host|native]
   atdd-flow attach <address> [--application <application>] [--wake host|native]
   atdd-flow pi extension-path
-  atdd-flow pi runtime authorize-adoption <thread> --by operator@desk --seat <seat> --pi-session <id> --pi-session-path <jsonl> --source-herdr-session <session> --source-pane <pane> --target-herdr-session <session> --target-pane <pane> --target-cwd <path>
-  atdd-flow pi runtime launch <address> [--pane <asserted-herdr-pane>] --herdr-session <session> [--resume] [--dry-run] [--adopt-session <exact-jsonl> --source-herdr-session <session> --source-pane <pane> --authorization <message-id>]
+  atdd-flow pi runtime authorize-adoption <id> --by operator@desk --seat <seat> --pi-session <id> --pi-session-path <jsonl> --source-herdr-session <session> --source-pane <pane> --target-herdr-session <session> --target-pane <pane> --target-cwd <path>
+  atdd-flow pi runtime launch <address> [--pane <asserted-herdr-pane>] --herdr-session <session> [--resume] [--dry-run] [--adopt-session <exact-jsonl> --source-herdr-session <session> --source-pane <pane> --authorization <record-id>]
   atdd-flow application use <address> <application>
   atdd-flow multiplexer status|apply herdr [--session <name>]
   atdd-flow describe <address> --purpose <one-line responsibility>
@@ -90,14 +90,14 @@ async function main() {
     attach: () => attach(root, required(rest[0], "address"), rest.slice(1)),
     pi: async () => {
       if (rest[0] === "extension-path") return console.log(piExtensionPath());
-      if (rest[0] === "runtime" && rest[1] === "authorize-adoption") return createExactSessionAdoptionAuthorization(root, required(rest[2], "authorization thread"), rest.slice(3));
+      if (rest[0] === "runtime" && rest[1] === "authorize-adoption") return createExactSessionAdoptionAuthorization(root, required(rest[2], "authorization id"), rest.slice(3));
       if (rest[0] === "runtime" && rest[1] === "launch") {
         const plan = await launchPiRuntime(root, required(rest[2], "address"), rest.slice(3));
         if (plan.dryRun) console.log(yaml.print(plan));
         else console.log(`Launched Pi runtime for ${required(rest[2], "address")} with ${plan.candidate}.`);
         return;
       }
-      throw new Error("Use `pi extension-path`, `pi runtime authorize-adoption <thread> ...`, or `pi runtime launch <address> [--pane <asserted-pane>] --herdr-session <session> [--resume] [--dry-run] [--adopt-session <exact-jsonl> --source-herdr-session <session> --source-pane <pane> --authorization <message-id>]`.");
+      throw new Error("Use `pi extension-path`, `pi runtime authorize-adoption <id> ...`, or `pi runtime launch <address> [--pane <asserted-pane>] --herdr-session <session> [--resume] [--dry-run] [--adopt-session <exact-jsonl> --source-herdr-session <session> --source-pane <pane> --authorization <record-id>]`.");
     },
     application: async () => {
       if (rest[0] === "use") return useApplication(root, required(rest[1], "address"), required(rest[2], "application"));
