@@ -188,4 +188,16 @@ test("RED: task-aware driver spawn must atomically derive from its exact task co
   expect(child).toContain("governed_base:");
   expect(child).toContain("branch: integration/payments");
   expect(child).toContain(`commit: ${integrationHead}`);
+
+  await git(repository, "branch", "delivery/existing", "main");
+  await run(site, "task", "add", "demo", "existing", "--title", "Existing", "--coordinator", "coordinator.payments@demo", "--done-when", "Must fail closed.");
+  expect(await fail(site, "spawn", "demo", "driver", "existing", "--task", "existing")).toContain("already exists; refusing to reuse it");
+  const existing = await Bun.file(join(site, "work", "demo", "tasks", "existing.yaml")).text();
+  expect(existing).not.toContain("assignee:");
+  expect(await Bun.file(join(worktrees, "existing")).exists()).toBe(false);
+
+  await writeFile(join(integration, "dirty.txt"), "dirty\n");
+  await run(site, "task", "add", "demo", "dirty", "--title", "Dirty", "--coordinator", "coordinator.payments@demo", "--done-when", "Must fail closed.");
+  expect(await fail(site, "spawn", "demo", "driver", "dirty", "--task", "dirty")).toContain("worktree is dirty");
+  expect((await Bun.file(join(site, "work", "demo", "tasks", "dirty.yaml")).text())).not.toContain("assignee:");
 }, 20_000);

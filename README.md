@@ -109,6 +109,8 @@ atdd-flow spawn example-app driver runtime
 
 `spawn` creates missing driver worktrees through Git: this example creates `/Users/you/Github/worktrees/example-app/runtime` on `delivery/runtime`. ATDD Bun owns safe retirement, not creation. A seat can own several tasks.
 
+For the canonical named-coordinator topology, create an unassigned `todo` task first, then use `atdd-flow spawn <project> driver <name> --task <task-id>`. Flow derives the fresh `delivery/<name>` worktree from the task coordinator's exact `integration/<stream>` head (or `main` for `main@project`), records that commit as `governed_base`, assigns the task, and reports the integration return branch. It refuses existing seats, worktrees, or branches and invalid, dirty, stale, generic, nested, or cross-project coordinator lineage rather than reusing history.
+
 ## Deliver work
 
 ```text

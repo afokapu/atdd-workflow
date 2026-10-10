@@ -1,15 +1,15 @@
 import { existsSync, realpathSync } from "node:fs";
-import { mkdir, readdir, readFile, writeFile } from "node:fs/promises";
+import { mkdir, readdir, readFile, rm, writeFile } from "node:fs/promises";
 import { createHash } from "node:crypto";
 import { basename, dirname, join, resolve } from "node:path";
 import { discoverAddress, discoverHerdrLocator, notify } from "./adapters";
 import {
   type Checkpoint, type Desk, type ModelCandidate, type ModelPortfolio, type Project, type Role, type Runtime, type Seat,
-  atomicYaml, canonicalAddress, desk, exists, fill, migrateDesk, modelPortfolio, now, paths, project, readYaml,
-  required, run, runOutput, runtimeAddress, seat, words, yaml,
+  atomicYaml, canonicalAddress, desk, exists, fill, has, migrateDesk, modelPortfolio, now, paths, project, readYaml,
+  required, run, runOutput, runtimeAddress, seat, taskId, words, yaml,
 } from "./core";
 import { type ModelSelectionInput, type ModelSelectionResponse, selectModel } from "./judgment";
-import { seatTasks } from "./tasks";
+import { type Task, seatTasks } from "./tasks";
 import { misplacedSeats, projectHerdrSeat } from "./multiplexer";
 import { isRuntimeStateStale, readRuntimeState } from "./runtime-state";
 import { resolveExactSessionAdoptionAuthorization } from "./adoption-authorizations";
@@ -112,9 +112,98 @@ async function ensureWorktree(config: Project, role: Role, worktree: string, bra
   await run(command, true);
 }
 
+async function noBranch(config: Project, branch: string) {
+  const probe = Bun.spawn(["git", "-C", required(config.repository, "project repository"), "show-ref", "--verify", "--quiet", `refs/heads/${branch}`]);
+  if (await probe.exited === 0) throw new Error(`Driver branch ${branch} already exists; refusing to reuse it.`);
+}
+
+async function taskCoordinatorBase(root: string, config: Project, task: Task) {
+  const coordinatorAddress = await canonicalAddress(root, task.coordinator);
+  const suffix = `@${config.project}`;
+  if (!coordinatorAddress.endsWith(suffix)) throw new Error(`Task coordinator ${coordinatorAddress} is outside project ${config.project}.`);
+  const coordinator = await seat(root, coordinatorAddress);
+  const primary = resolve(required(config.repository, "project repository"));
+  let branch: string;
+  if (coordinator.role === "main") {
+    if (coordinator.address !== `main@${config.project}` || coordinator.branch !== "main" || resolve(coordinator.worktree) !== primary) {
+      throw new Error(`Main coordinator ${coordinator.address} has mismatched primary lineage.`);
+    }
+    branch = "main";
+  } else if (coordinator.role === "coordinator") {
+    const match = coordinator.address.match(new RegExp(`^coordinator\\.([a-z0-9_-]+)@${config.project}$`));
+    if (!match || coordinator.branch !== `integration/${match[1]}` || resolve(coordinator.worktree) === primary) {
+      throw new Error(`Coordinator ${coordinator.address} has mismatched, generic, or nested integration lineage.`);
+    }
+    branch = coordinator.branch;
+  } else {
+    throw new Error(`Task coordinator ${coordinator.address} must be main or a named coordinator.`);
+  }
+  if (coordinator.project !== config.project) throw new Error(`Task coordinator ${coordinator.address} is outside project ${config.project}.`);
+  if (await runOutput(["git", "-C", coordinator.worktree, "status", "--porcelain"])) {
+    throw new Error(`Coordinator ${coordinator.address} worktree is dirty.`);
+  }
+  const checkedOut = await runOutput(["git", "-C", coordinator.worktree, "branch", "--show-current"]);
+  if (checkedOut !== branch) throw new Error(`Coordinator ${coordinator.address} is not checked out at ${branch}.`);
+  const head = await runOutput(["git", "-C", coordinator.worktree, "rev-parse", "HEAD"]);
+  const branchHead = await runOutput(["git", "-C", required(config.repository, "project repository"), "rev-parse", branch]);
+  if (head !== branchHead) throw new Error(`Coordinator ${coordinator.address} head is stale relative to ${branch}.`);
+  return { coordinator, branch, commit: head };
+}
+
+/** Creates a fresh driver and assigns its existing todo task from the task coordinator's exact head. */
+async function spawnTaskDriver(root: string, config: Project, role: Role, name: string, args: string[]) {
+  if (role.address !== "driver.{name}@{project}" || role.branch !== "delivery/{name}" || !role.worktree) {
+    throw new Error("Task-aware driver spawn requires the canonical driver role topology.");
+  }
+  if (has(args, "--worktree") || has(args, "--branch")) throw new Error("Task-aware driver spawn derives its worktree and branch; do not provide --worktree or --branch.");
+  const id = taskId(required(words(args, "--task"), "--task"));
+  const task = await readYaml<Task>(paths(root).taskFile(config.project, id));
+  if (task.schema !== "atdd-workflow/task/v1") throw new Error(`Unsupported task schema: ${id}`);
+  if (task.status !== "todo" || task.assignee) throw new Error(`Task ${id} must be an unassigned todo task.`);
+  const entries = { project: config.project, name, worktree_root: config.worktree_root ?? "" };
+  const address = fill(role.address, entries);
+  const branch = fill(role.branch, entries);
+  const worktree = resolve(fill(role.worktree, { ...entries, repository: config.repository ?? "" }));
+  if (await exists(paths(root).seatFile(address))) throw new Error(`Driver seat ${address} already exists; refusing to reuse it.`);
+  if (await exists(worktree)) throw new Error(`Driver worktree ${worktree} already exists; refusing to reuse it.`);
+  await noBranch(config, branch);
+  const base = await taskCoordinatorBase(root, config, task);
+  const portfolio = await modelPortfolio(root);
+  const requestedAgent = words(args, "--agent");
+  if (portfolio && requestedAgent) throw new Error("--agent is a legacy pin and cannot be used when models.yaml owns model allocation.");
+  const legacyAgent = portfolio ? undefined : requestedAgent ?? role.agent;
+  const purpose = words(args, "--purpose") ?? (role.purpose ? fill(role.purpose, entries) : undefined);
+  const record: Seat = {
+    schema: "atdd-workflow/seat/v2", address, role: "driver", project: config.project, worktree, branch,
+    ...(legacyAgent ? { agent: legacyAgent } : {}), ...(purpose ? { purpose } : {}),
+  };
+  task.assignee = address;
+  task.governed_base = { coordinator: base.coordinator.address, branch: base.branch, commit: base.commit };
+  let created = false;
+  try {
+    await mkdir(dirname(worktree), { recursive: true });
+    await run(["git", "-C", required(config.repository, "project repository"), "worktree", "add", "-b", branch, worktree, base.commit], true);
+    created = true;
+    const current = await runOutput(["git", "-C", base.coordinator.worktree, "rev-parse", "HEAD"]);
+    const currentBranch = await runOutput(["git", "-C", required(config.repository, "project repository"), "rev-parse", base.branch]);
+    if (current !== base.commit || currentBranch !== base.commit) throw new Error(`Coordinator ${base.coordinator.address} advanced during driver provisioning.`);
+    await atomicYaml(paths(root).seatFile(address), record);
+    await atomicYaml(paths(root).taskFile(config.project, id), task);
+  } catch (error) {
+    if (created) await run(["git", "-C", required(config.repository, "project repository"), "worktree", "remove", "--force", worktree], true).catch(() => undefined);
+    await rm(paths(root).seat(address), { recursive: true, force: true });
+    throw error;
+  }
+  console.log(`${address}  assigned ${id}  return ${base.branch}`);
+}
+
 export async function spawn(root: string, projectName: string, roleName: string, name: string, args: string[]) {
   const config = await project(root, projectName);
   const role = required(config.roles[roleName], `role ${roleName}`);
+  if (words(args, "--task")) {
+    if (roleName !== "driver") throw new Error("--task is supported only for driver spawn.");
+    return spawnTaskDriver(root, config, role, name, args);
+  }
   const entries = { project: config.project, name, worktree_root: config.worktree_root ?? "" };
   // Retain the historical primary coordinator command for existing Desks while
   // new defaults make main@project the only new primary identity.
