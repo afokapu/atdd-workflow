@@ -34,6 +34,22 @@ async function git(cwd: string, ...args: string[]) {
   return stdout.trim();
 }
 
+async function fail(cwd: string, ...args: string[]) {
+  const child = Bun.spawn([process.execPath, cli, ...args], {
+    cwd,
+    env: { ...process.env, ATDD_WORKFLOW_ROOT: undefined, ATDD_WORKFLOW_SEAT: undefined },
+    stdout: "pipe",
+    stderr: "pipe",
+  });
+  const [stdout, stderr, code] = await Promise.all([
+    new Response(child.stdout).text(),
+    new Response(child.stderr).text(),
+    child.exited,
+  ]);
+  expect(code).not.toBe(0);
+  return `${stdout}${stderr}`;
+}
+
 afterEach(async () => { await Promise.all(roots.splice(0).map((root) => rm(root, { recursive: true, force: true }))); });
 
 test("RED: defaults make main primary and named coordinators bounded integration worktrees", async () => {
@@ -67,4 +83,48 @@ test("RED: defaults make main primary and named coordinators bounded integration
   await expect(projectHerdrSeat(site, "coordinator.payments@demo", "fake", async () => {
     throw new Error("projection must reject invalid topology before calling Herdr");
   })).rejects.toThrow("must use one linked integration/<stream> worktree and branch");
+}, 20_000);
+
+test("RED: assigned drivers record the exact task-coordinator base and reject mismatch or nested streams", async () => {
+  const root = await mkdtemp(join(tmpdir(), "atdd-integration-governed-base-"));
+  roots.push(root);
+  const site = join(root, "desk");
+  const repository = join(root, "repository");
+  const worktrees = join(root, "worktrees");
+  const driver = join(worktrees, "stream-driver");
+  await mkdir(repository);
+  await git(repository, "init", "--initial-branch=main");
+  await writeFile(join(repository, "README.md"), "fixture\n");
+  await git(repository, "add", "README.md");
+  await git(repository, "-c", "user.email=fixture@example.test", "-c", "user.name=Fixture", "commit", "-m", "initial");
+
+  await run(root, "init", site);
+  await run(site, "project", "init", "demo");
+  const projectFile = join(site, "work", "demo", "project.yaml");
+  const project = Bun.YAML.parse(await Bun.file(projectFile).text()) as Record<string, unknown>;
+  project.repository = repository;
+  project.worktree_root = worktrees;
+  await Bun.write(projectFile, Bun.YAML.stringify(project));
+  await run(site, "spawn", "demo", "main", "primary");
+  await run(site, "spawn", "demo", "coordinator", "payments");
+  const integration = join(worktrees, "payments");
+  await writeFile(join(integration, "INTEGRATION.md"), "integration head\n");
+  await git(integration, "add", "INTEGRATION.md");
+  await git(integration, "-c", "user.email=fixture@example.test", "-c", "user.name=Fixture", "commit", "-m", "integration");
+  const integrationHead = await git(integration, "rev-parse", "HEAD");
+  await git(repository, "worktree", "add", "-b", "delivery/stream-driver", driver, "integration/payments");
+  await run(site, "spawn", "demo", "driver", "stream-driver");
+
+  await run(site, "task", "add", "demo", "stream", "--title", "Stream delivery", "--coordinator", "coordinator.payments@demo", "--assignee", "driver.stream-driver@demo", "--done-when", "Deliver from the stream base.");
+  const task = await Bun.file(join(site, "work", "demo", "tasks", "stream.yaml")).text();
+  expect(task).toContain("governed_base:");
+  expect(task).toContain("coordinator: coordinator.payments@demo");
+  expect(task).toContain("branch: integration/payments");
+  expect(task).toContain(`commit: ${integrationHead}`);
+
+  const mismatch = join(worktrees, "mismatch-driver");
+  await git(repository, "worktree", "add", "-b", "delivery/mismatch-driver", mismatch, "main");
+  await run(site, "spawn", "demo", "driver", "mismatch-driver");
+  expect(await fail(site, "task", "add", "demo", "mismatch", "--title", "Mismatch", "--coordinator", "coordinator.payments@demo", "--assignee", "driver.mismatch-driver@demo", "--done-when", "Must refuse.")).toContain("not based on the exact coordinator head");
+  expect(await fail(site, "spawn", "demo", "coordinator", "nested.stream")).toContain("single stream");
 }, 20_000);

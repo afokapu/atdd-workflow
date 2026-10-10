@@ -1,4 +1,5 @@
 import { readdir } from "node:fs/promises";
+import { resolve } from "node:path";
 import {
   type Checkpoint, atomicYaml, canonicalAddress, now, paths, project, readYaml, required, runOutput, seat, taskId, values, words,
 } from "./core";
@@ -10,6 +11,7 @@ export type HandoffState = "executing" | "awaiting_coordinator" | "awaiting_assi
 /** A mutable projection of an immutable evidence message/reference, not a second task lifecycle. */
 export type TaskHandoff = { state: HandoffState; evidence: string; updated_at: string };
 export type DoneWhen = { text: string; proof?: string };
+export type GovernedBase = { coordinator: string; branch: string; commit: string };
 export type Task = {
   schema: "atdd-workflow/task/v1";
   title: string;
@@ -24,6 +26,8 @@ export type Task = {
   phase?: TaskPhase;
   /** Absent on legacy tasks; evidence remains an opaque immutable message/reference. */
   handoff?: TaskHandoff;
+  /** Exact named-coordinator or main head from which an assigned driver is governed. */
+  governed_base?: GovernedBase;
   done_when: DoneWhen[];
 };
 
@@ -69,6 +73,42 @@ async function writeTask(root: string, projectName: string, id: string, task: Ta
   await atomicYaml(paths(root).taskFile(projectName, id), task);
 }
 
+/** Records the exact parent head for new bounded topology without rewriting legacy tasks. */
+async function governedBase(root: string, projectName: string, coordinatorAddress: string, assignee?: string): Promise<GovernedBase | undefined> {
+  if (!assignee) return undefined;
+  const config = await project(root, projectName);
+  if (!config.repository) return undefined;
+  const coordinator = await seat(root, coordinatorAddress);
+  const driver = await seat(root, assignee);
+  if (driver.role !== "driver") throw new Error(`${assignee} is not a driver seat.`);
+  const primary = resolve(config.repository);
+  let branch: string;
+  if (coordinator.role === "main") {
+    if (coordinator.address !== `main@${config.project}` || coordinator.branch !== "main" || resolve(coordinator.worktree) !== primary) {
+      throw new Error(`Main coordinator ${coordinator.address} has mismatched primary lineage.`);
+    }
+    branch = "main";
+  } else if (coordinator.role === "coordinator") {
+    const configured = config.roles.coordinator;
+    // Existing coordinator role templates and coordinator@project records
+    // predate bounded integration lineage and remain readable unchanged.
+    if (configured?.address !== "coordinator.{name}@{project}" || configured.branch !== "integration/{name}" || coordinator.address === `coordinator@${config.project}`) return undefined;
+    const suffix = `@${config.project}`;
+    const local = coordinator.address.endsWith(suffix) ? coordinator.address.slice(0, -suffix.length) : "";
+    const match = local.match(/^coordinator\.([a-z0-9_-]+)$/);
+    if (!match || coordinator.branch !== `integration/${match[1]}` || resolve(coordinator.worktree) === primary) {
+      throw new Error(`Coordinator ${coordinator.address} has mismatched or nested integration lineage.`);
+    }
+    branch = coordinator.branch;
+  } else {
+    throw new Error(`Task coordinator ${coordinator.address} must be main or a named coordinator.`);
+  }
+  const commit = await runOutput(["git", "-C", coordinator.worktree, "rev-parse", branch]);
+  const common = await runOutput(["git", "-C", driver.worktree, "merge-base", commit, driver.branch]);
+  if (common !== commit) throw new Error(`Driver ${driver.address} is not based on the exact coordinator head ${commit}.`);
+  return { coordinator: coordinator.address, branch, commit };
+}
+
 async function retireAssignee(root: string, projectName: string, id: string, task: Task) {
   const assignee = required(task.assignee, `an assignee for task ${id}`);
   const unfinished = (await allTasks(root, projectName))
@@ -107,6 +147,7 @@ export async function add(root: string, projectName: string, id: string, args: s
   const assignee = assigneeValue ? await canonicalAddress(root, assigneeValue) : undefined;
   await seat(root, coordinator);
   if (assignee) await seat(root, assignee);
+  const base = await governedBase(root, projectName, coordinator, assignee);
   const doneWhen = values(args, "--done-when").map((text) => ({ text }));
   if (!doneWhen.length) throw new Error("A task needs at least one --done-when criterion.");
   const dependsOn = words(args, "--depends-on")?.split(",").filter(Boolean).map(taskId);
@@ -116,6 +157,7 @@ export async function add(root: string, projectName: string, id: string, args: s
     status: "todo",
     coordinator,
     ...(assignee ? { assignee } : {}),
+    ...(base ? { governed_base: base } : {}),
     ...(words(args, "--body") ? { body: words(args, "--body") } : {}),
     ...(words(args, "--source") ? { source: words(args, "--source") } : {}),
     ...(dependsOn?.length ? { depends_on: dependsOn } : {}),
@@ -133,7 +175,9 @@ export async function assign(root: string, projectName: string, id: string, args
   if (task.assignee) throw new Error(`Task ${id} is already assigned to ${task.assignee}.`);
   const assignee = await canonicalAddress(root, required(words(args, "--assignee"), "--assignee"));
   await seat(root, assignee);
+  const base = await governedBase(root, projectName, task.coordinator, assignee);
   task.assignee = assignee;
+  if (base) task.governed_base = base;
   await writeTask(root, projectName, id, task);
   console.log(`${id}  assigned  ${assignee}`);
 }

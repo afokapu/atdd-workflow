@@ -96,6 +96,7 @@ export async function spawn(root: string, projectName: string, roleName: string,
     throw new Error(`Main seat main@${config.project} must use the declared primary main worktree and branch.`);
   }
   if (newNamedCoordinatorDefaults) {
+    if (!/^[a-z0-9_-]+$/.test(name)) throw new Error("Named coordinator must use one single stream name.");
     const expectedWorktree = resolve(fill(required(role.worktree, "named coordinator worktree template"), { ...entries, repository: config.repository ?? "" }));
     if (branch !== `integration/${name}` || worktree !== expectedWorktree) {
       throw new Error(`Named coordinator ${address} must use its declared integration/${name} branch and linked worktree.`);
