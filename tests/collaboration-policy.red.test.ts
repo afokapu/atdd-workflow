@@ -68,10 +68,31 @@ test("an unresolved expects_result remains visible after later thread activity",
   expect(output.join("\n")).toContain(`waiting:${request}@driver.worker@demo`);
 });
 
-test("canonical policy requires durable inbox reconciliation and main-only merge custody", () => {
+test("canonical policy requires inbox-first, task-message, operator-routing, and main-merge custody", () => {
   const policy = canonicalCollaborationPolicy();
-  expect(policy).toContain("reconcile their durable inbox after every bounded action, phase completion, or wait");
+  expect(policy).toContain("reconcile their durable inbox as the first action at every session, turn, and task resumption");
+  expect(policy).toContain("Messages only communicate, evidence, consensus, authorization, or status");
+  expect(policy).toContain("The operator accepts and receipts inbound communication from any seat");
   expect(policy).toContain("Only main@project executes that project repository merge");
+});
+
+test("projection caps each Markdown instruction file at 20 lines and fails closed without changing over-cap user content", async () => {
+  const root = await workspace();
+  const agents = join(root, "AGENTS.md");
+  const claude = join(root, "CLAUDE.md");
+  const overCap = `${Array.from({ length: 21 }, (_, index) => `user line ${index + 1}`).join("\n")}\n`;
+  await writeFile(agents, overCap, "utf8");
+  await writeFile(claude, "user content\n", "utf8");
+
+  await expect(projectCollaborationPolicy(root)).rejects.toThrow("exceeds the 20-line cap");
+  expect(await readFile(agents, "utf8")).toBe(overCap);
+  expect(await readFile(claude, "utf8")).toBe("user content\n");
+
+  const capped = await workspace();
+  await projectCollaborationPolicy(capped);
+  for (const name of ["AGENTS.md", "CLAUDE.md"]) {
+    expect((await readFile(join(capped, name), "utf8")).trimEnd().split(/\r?\n/)).toHaveLength(3);
+  }
 });
 
 test("Pi startup resolves the canonical collaboration policy rather than a duplicated runtime copy", () => {
