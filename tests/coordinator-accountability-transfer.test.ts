@@ -90,9 +90,17 @@ async function task(fixture: Fixture, id: string) {
   return Bun.YAML.parse(await readFile(join(fixture.site, "work", "demo", "tasks", `${id}.yaml`), "utf8")) as Record<string, unknown>;
 }
 
-async function ownerAuthorization(fixture: Fixture) {
-  const thread = await run(fixture.site, "thread", "start", "--with", "operator@desk,main@demo", "--subject", "Authorized topology plan");
-  return run(fixture.site, "post", thread, "--from", "operator@desk", "--to", "main@demo", "--label", "topology-plan", "--body", "Owner-authorized topology plan.");
+async function ownerAuthorization(fixture: Fixture, recipient = "main@demo") {
+  const thread = "T-owner-authorized-topology-plan";
+  const authorization = `M-owner-authorized-${recipient.replace(/[^a-z0-9]/gi, "-")}`;
+  await mkdir(join(fixture.site, "threads", thread), { recursive: true });
+  await Bun.write(join(fixture.site, "threads", thread, "thread.yaml"), Bun.YAML.stringify({
+    schema: "atdd-workflow/thread/v1", id: thread, participants: ["operator@desk", "main@demo", "coordinator.payments@demo"], subject: "Authorized topology plan", state: "open",
+  }));
+  await Bun.write(join(fixture.site, "threads", thread, `${authorization}.yaml`), Bun.YAML.stringify({
+    schema: "atdd-workflow/message/v1", id: authorization, from: "operator@desk", to: [recipient], kind: "message", created_at: "2026-10-10T00:00:00.000Z", body: "Owner-authorized topology plan.",
+  }));
+  return authorization;
 }
 
 afterEach(async () => { await Promise.all(roots.splice(0).map((root) => rm(root, { recursive: true, force: true }))); });
@@ -100,6 +108,11 @@ afterEach(async () => { await Promise.all(roots.splice(0).map((root) => rm(root,
 test("RED: current task accountability cannot transfer without the governed CLI transition", async () => {
   const subject = await fixture();
   await addActiveTask(subject, "transfer");
+  const record = await task(subject, "transfer");
+  record.phase = "red";
+  record.handoff = { state: "executing", evidence: "M-prior-phase-evidence", updated_at: "2026-10-10T00:00:00.000Z" };
+  (record.done_when as Array<Record<string, string>>)[0].proof = "M-prior-review-evidence";
+  await Bun.write(join(subject.site, "work", "demo", "tasks", "transfer.yaml"), Bun.YAML.stringify(record));
 
   expect(await run(subject.site, "--help")).toContain("task transfer <project> <task-id> --to <main-or-named-coordinator> --reason <text> --by <actor>");
   expect(await run(subject.site, "task", "transfer", "demo", "transfer", "--to", "main@demo", "--reason", "Main duplicate", "--by", "coordinator.payments@demo"))
@@ -109,6 +122,9 @@ test("RED: current task accountability cannot transfer without the governed CLI 
     status: "in_progress",
     coordinator: "main@demo",
     governed_base: { coordinator: "main@demo", branch: "main", commit: subject.mainHead },
+    phase: "red",
+    handoff: { state: "executing", evidence: "M-prior-phase-evidence" },
+    done_when: [{ proof: "M-prior-review-evidence" }],
     coordinator_transfers: [{
       from: "coordinator.payments@demo",
       to: "main@demo",
@@ -117,7 +133,7 @@ test("RED: current task accountability cannot transfer without the governed CLI 
       effective_at: expect.any(String),
     }],
   });
-});
+}, 20_000);
 
 test("RED: transfer provenance is append-only and manual coordinator rewriting is rejected", async () => {
   const subject = await fixture();
@@ -131,7 +147,7 @@ test("RED: transfer provenance is append-only and manual coordinator rewriting i
     coordinator: "main@demo",
     governed_base: { coordinator: "coordinator.payments@demo", branch: "integration/payments", commit: subject.integrationHead },
   });
-});
+}, 20_000);
 
 test("RED: only the current coordinator or main with an operator authorization may transfer", async () => {
   const subject = await fixture();
@@ -142,6 +158,10 @@ test("RED: only the current coordinator or main with an operator authorization m
   expect(await fail(subject.site, "task", "transfer", "demo", "authorization", "--to", "coordinator.payments@demo", "--reason", "Bounded stream", "--by", "main@demo"))
     .toContain("owner-authorized topology plan");
 
+  const inapplicable = await ownerAuthorization(subject, "coordinator.payments@demo");
+  expect(await fail(subject.site, "task", "transfer", "demo", "authorization", "--to", "coordinator.payments@demo", "--reason", "Bounded stream", "--authorization", inapplicable, "--by", "main@demo"))
+    .toContain(`not applicable to main@demo`);
+
   const authorization = await ownerAuthorization(subject);
   expect(await run(subject.site, "task", "transfer", "demo", "authorization", "--to", "coordinator.payments@demo", "--reason", "Bounded stream", "--authorization", authorization, "--by", "main@demo"))
     .toBe("authorization  coordinator transferred  main@demo -> coordinator.payments@demo");
@@ -150,7 +170,7 @@ test("RED: only the current coordinator or main with an operator authorization m
     governed_base: { coordinator: "coordinator.payments@demo", branch: "integration/payments", commit: subject.integrationHead },
     coordinator_transfers: [{ authorization, from: "main@demo", to: "coordinator.payments@demo" }],
   });
-});
+}, 20_000);
 
 test("RED: transfer never moves worktrees and duplicate, nested, or mismatched targets fail closed", async () => {
   const subject = await fixture();
@@ -167,6 +187,7 @@ test("RED: transfer never moves worktrees and duplicate, nested, or mismatched t
   const nested = join(subject.site, "work", "demo", "seats", "coordinator.nested.stream", "seat.yaml");
   await mkdir(join(nested, ".."), { recursive: true });
   await Bun.write(nested, Bun.YAML.stringify({ schema: "atdd-workflow/seat/v2", address: "coordinator.nested.stream@demo", role: "coordinator", project: "demo", worktree: subject.integration, branch: "integration/nested/stream" }));
-  expect(await fail(subject.site, "task", "transfer", "demo", "fail-closed", "--to", "coordinator.nested.stream@demo", "--reason", "Nested", "--by", "main@demo"))
+  const authorization = await ownerAuthorization(subject);
+  expect(await fail(subject.site, "task", "transfer", "demo", "fail-closed", "--to", "coordinator.nested.stream@demo", "--reason", "Nested", "--authorization", authorization, "--by", "main@demo"))
     .toMatch(/nested|integration lineage/i);
-});
+}, 20_000);

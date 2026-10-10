@@ -12,6 +12,16 @@ export type HandoffState = "executing" | "awaiting_coordinator" | "awaiting_assi
 export type TaskHandoff = { state: HandoffState; evidence: string; updated_at: string };
 export type DoneWhen = { text: string; proof?: string };
 export type GovernedBase = { coordinator: string; branch: string; commit: string };
+/** An append-only accountability decision; prior coordinator evidence remains untouched. */
+export type CoordinatorTransfer = {
+  from: string;
+  to: string;
+  reason: string;
+  /** Required when main executes the transfer; references an operator@desk message. */
+  authorization?: string;
+  exact_head: { branch: string; commit: string };
+  effective_at: string;
+};
 export type Task = {
   schema: "atdd-workflow/task/v1";
   title: string;
@@ -28,6 +38,8 @@ export type Task = {
   handoff?: TaskHandoff;
   /** Exact named-coordinator or main head from which an assigned driver is governed. */
   governed_base?: GovernedBase;
+  /** Absent on legacy tasks; later entries never rewrite earlier coordinator evidence. */
+  coordinator_transfers?: CoordinatorTransfer[];
   done_when: DoneWhen[];
 };
 
@@ -40,9 +52,29 @@ const transitions: Record<TaskStatus, TaskStatus[]> = {
   done: [],
 };
 
+function assertCoordinatorIntegrity(task: Task, id: string) {
+  const transfers = task.coordinator_transfers;
+  if (transfers && !Array.isArray(transfers)) throw new Error(`Task ${id} has invalid immutable transfer provenance.`);
+  const latest = transfers?.at(-1);
+  if (latest) {
+    if (!latest.from || !latest.to || !latest.reason || !latest.effective_at || !latest.exact_head?.branch || !latest.exact_head.commit) {
+      throw new Error(`Task ${id} has invalid immutable transfer provenance.`);
+    }
+    if (task.coordinator !== latest.to || !task.governed_base
+      || task.governed_base.coordinator !== latest.to
+      || task.governed_base.branch !== latest.exact_head.branch
+      || task.governed_base.commit !== latest.exact_head.commit) {
+      throw new Error(`Task ${id} coordinator is not backed by immutable transfer provenance.`);
+    }
+  } else if (task.governed_base && task.governed_base.coordinator !== task.coordinator) {
+    throw new Error(`Task ${id} coordinator is not backed by immutable transfer provenance.`);
+  }
+}
+
 async function readTask(root: string, projectName: string, id: string) {
   const record = await readYaml<Task>(paths(root).taskFile(projectName, id));
   if (record.schema !== "atdd-workflow/task/v1") throw new Error(`Unsupported task schema: ${id}`);
+  assertCoordinatorIntegrity(record, id);
   return record;
 }
 
@@ -180,6 +212,64 @@ export async function assign(root: string, projectName: string, id: string, args
   if (base) task.governed_base = base;
   await writeTask(root, projectName, id, task);
   console.log(`${id}  assigned  ${assignee}`);
+}
+
+async function operatorAuthorization(root: string, reference: string, main: string) {
+  type AuthorizationMessage = { schema?: string; id?: string; from?: string; to?: "all" | string[] };
+  type AuthorizationThread = { schema?: string; participants?: string[] };
+  const folders = await readdir(paths(root).threads, { withFileTypes: true });
+  const matches = (await Promise.all(folders.filter((entry) => entry.isDirectory() && entry.name.startsWith("T-"))
+    .map(async (entry) => {
+      try {
+        const [thread, message] = await Promise.all([
+          readYaml<AuthorizationThread>(paths(root).threadFile(entry.name)),
+          readYaml<AuthorizationMessage>(paths(root).message(entry.name, reference)),
+        ]);
+        return { thread, message };
+      } catch { return undefined; }
+    }))).filter((entry): entry is NonNullable<typeof entry> =>
+      entry?.thread.schema === "atdd-workflow/thread/v1" && entry.thread.participants?.includes(main) === true
+      && entry.message.schema === "atdd-workflow/message/v1" && entry.message.id === reference);
+  if (matches.length !== 1 || matches[0]?.message.from !== "operator@desk") {
+    throw new Error(`Authorization ${reference} is not an owner-authorized topology plan.`);
+  }
+  if (matches[0].message.to !== "all" && !matches[0].message.to?.includes(main)) {
+    throw new Error(`Authorization ${reference} is not applicable to ${main}.`);
+  }
+}
+
+/**
+ * Changes only the current task accountability projection. The record is
+ * append-only and validates the target's existing topology; it never creates,
+ * moves, cleans, or binds a seat/worktree.
+ */
+export async function transfer(root: string, projectName: string, id: string, args: string[]) {
+  const task = await readTask(root, projectName, taskId(id));
+  const config = await project(root, projectName);
+  const actor = await canonicalAddress(root, required(words(args, "--by"), "--by"));
+  const target = await canonicalAddress(root, required(words(args, "--to"), "--to"));
+  const main = `main@${config.project}`;
+  if (target === task.coordinator) throw new Error(`Task ${id} is already accountable to ${target}.`);
+  if (actor === main) await operatorAuthorization(root, required(words(args, "--authorization"), "an owner-authorized topology plan"), main);
+  else if (actor !== task.coordinator) throw new Error(`Only ${main} or the current coordinator may transfer task ${id}.`);
+
+  // governedBase confirms main/named-coordinator identity, exact branch head,
+  // and the driver's descendant relationship before accountability changes.
+  const base = await governedBase(root, projectName, target, task.assignee);
+  if (!base) throw new Error(`Task ${id} needs an assigned driver and governed repository before transfer.`);
+  const transfer: CoordinatorTransfer = {
+    from: task.coordinator,
+    to: target,
+    reason: required(words(args, "--reason"), "--reason"),
+    ...(actor === main ? { authorization: required(words(args, "--authorization"), "an owner-authorized topology plan") } : {}),
+    exact_head: { branch: base.branch, commit: base.commit },
+    effective_at: now(),
+  };
+  task.coordinator = target;
+  task.governed_base = base;
+  task.coordinator_transfers = [...(task.coordinator_transfers ?? []), transfer];
+  await writeTask(root, projectName, taskId(id), task);
+  console.log(`${id}  coordinator transferred  ${transfer.from} -> ${transfer.to}`);
 }
 
 export async function amend(root: string, projectName: string, id: string, args: string[]) {
