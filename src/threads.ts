@@ -236,6 +236,7 @@ async function post(root: string, threadId: string, args: string[], overrides: P
   await Promise.all(prepared.filter((entry): entry is NonNullable<typeof entry> => Boolean(entry)).map((entry) => publishNativeMail(root, entry.address, entry.segment, message.id)));
   await Promise.all(recipients.filter((address) => address !== from).map((recipient) => inject(root, recipient, message, threadId, prepared.some((entry) => entry?.address === recipient))));
   console.log(message.id);
+  return message.id;
 }
 
 export async function startThread(root: string, args: string[]) {
@@ -249,6 +250,7 @@ export async function startThread(root: string, args: string[]) {
   };
   await atomicYaml(paths(root).threadFile(record.id), record);
   console.log(record.id);
+  return record.id;
 }
 
 export async function addParticipant(root: string, threadId: string, address: string) {
