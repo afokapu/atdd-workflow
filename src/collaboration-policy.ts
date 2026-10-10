@@ -45,18 +45,29 @@ export function projectCollaborationPolicyText(source: string) {
   return `${source}${source.endsWith("\n") ? "\n" : "\n\n"}${block()}`;
 }
 
-/** Idempotently projects the canonical pointer into the two conventional agent instruction files. */
+function lineCount(text: string) {
+  return text ? text.replace(/\r?\n$/, "").split(/\r?\n/).length : 0;
+}
+
+/** Idempotently projects the canonical pointer while preserving user content and refusing oversized instruction files. */
 export async function projectCollaborationPolicy(root: string) {
-  for (const name of ["AGENTS.md", "CLAUDE.md"]) {
+  const projections = await Promise.all(["AGENTS.md", "CLAUDE.md"].map(async (name) => {
     const file = join(root, name);
     let source = "";
     try { source = await readFile(file, "utf8"); }
     catch (error) {
       if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
     }
-    const next = projectCollaborationPolicyText(source);
-    if (next !== source) await writeFile(file, next, "utf8");
+    return { name, file, source, next: projectCollaborationPolicyText(source) };
+  }));
+  for (const { name, source, next } of projections) {
+    if (lineCount(source) > 20 || lineCount(next) > 20) {
+      throw new Error(`${name} exceeds the 20-line cap; refusing projection without changing user content.`);
+    }
   }
+  await Promise.all(projections.map(async ({ file, source, next }) => {
+    if (next !== source) await writeFile(file, next, "utf8");
+  }));
 }
 
 /** The one startup handoff for supported Flow-managed runtimes, resolved from the canonical convention. */
