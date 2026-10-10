@@ -35,7 +35,7 @@ async function priorRuntime(root: string) {
   await atomicYaml(paths(root).seatFile(seat), saved);
 }
 
-function fakeHerdr(options: { released?: boolean; verifiedPath?: string; agentLifecycle?: { key?: "agent_status" | "status" | "state"; value?: string } } = {}) {
+function fakeHerdr(options: { released?: boolean; sourceLive?: boolean; verifiedPath?: string; agentLifecycle?: { key?: "agent_status" | "status" | "state"; value?: string } } = {}) {
   const calls: string[][] = [];
   let started = false;
   let requestedId = sessionId;
@@ -46,6 +46,7 @@ function fakeHerdr(options: { released?: boolean; verifiedPath?: string; agentLi
     calls,
     command: async (command: string[]) => {
       calls.push(command);
+      const session = command[2];
       const args = command.slice(3);
       if (args[0] === "workspace" && args[1] === "list") return JSON.stringify({ result: { workspaces: [
         { workspace_id: "w1", label: "demo", worktree: { checkout_path: "/work/primary" } },
@@ -53,11 +54,11 @@ function fakeHerdr(options: { released?: boolean; verifiedPath?: string; agentLi
       ] } });
       if (args[0] === "tab" && args[1] === "list") return JSON.stringify({ result: { tabs: [{ tab_id: "w2:t1", workspace_id: "w2", label: seat }] } });
       if (args[0] === "pane" && args[1] === "list") return JSON.stringify({ result: { panes: [{ pane_id: "w1:p2", tab_id: "w2:t1", label: seat }] } });
-      if (args[0] === "pane" && args[1] === "get") return JSON.stringify({ result: { pane: started ? running() : shell } });
+      if (args[0] === "pane" && args[1] === "get") return JSON.stringify({ result: { pane: started || (session !== "forge" && options.sourceLive) ? running() : shell } });
       if (args[0] === "pane" && args[1] === "process-info") return JSON.stringify({ result: { process_info: {
         pane_id: "w1:p2", shell_pid: 11,
         // Copied installed shape: node/pi argv0 is available, argv is absent.
-        foreground_processes: started ? [{ pid: 22, name: "node", argv0: "node" }, { pid: 23, name: "pi", argv0: "pi" }] : [{ pid: 11, name: "zsh", argv0: "zsh" }],
+        foreground_processes: started || (session !== "forge" && options.sourceLive) ? [{ pid: 22, name: "node", argv0: "node" }, { pid: 23, name: "pi", argv0: "pi" }] : [{ pid: 11, name: "zsh", argv0: "zsh" }],
       } } });
       if (args[0] === "pane" && args[1] === "run") return JSON.stringify({ result: { pane_id: "w1:p2" } });
       if (args[0] === "agent" && args[1] === "start") {
@@ -179,6 +180,34 @@ test("RED: explicit exact-session adoption needs a released source, backup hash,
   } });
   expect(typeof (receipt.relocation as Record<string, unknown>).backup_sha256).toBe("string");
   expect(await Bun.file((receipt.relocation as Record<string, string>).backup).exists()).toBe(true);
+});
+
+test("exact-session adoption fails closed for live sources, wrong targets, missing authorization, and receipt substitution", async () => {
+  const args = (source: string) => ["--herdr-session", "forge", "--adopt-session", source, "--source-herdr-session", "legacy", "--source-pane", "w1:p2", "--authorization", "thread:T-owner#M-authorized"];
+  const live = await desk();
+  const liveSource = join(live, `legacy_${sessionId}.jsonl`);
+  await writeFile(liveSource, "source");
+  await expect(launchPiRuntime(live, seat, args(liveSource), { select: selectEconomy, command: fakeHerdr({ sourceLive: true, verifiedPath: liveSource }).command }))
+    .rejects.toThrow("source Pi has exited and been released");
+
+  const missingAuthorization = await desk();
+  const unauthorizedSource = join(missingAuthorization, `legacy_${sessionId}.jsonl`);
+  await writeFile(unauthorizedSource, "source");
+  await expect(launchPiRuntime(missingAuthorization, seat, args(unauthorizedSource).filter((value) => value !== "--authorization" && value !== "thread:T-owner#M-authorized"), { select: selectEconomy, command: fakeHerdr().command }))
+    .rejects.toThrow("requires --adopt-session");
+  await expect(launchPiRuntime(missingAuthorization, seat, [...args(unauthorizedSource), "--pane", "w9:p9"], { select: selectEconomy, command: fakeHerdr().command }))
+    .rejects.toThrow("does not match the seat-scoped Herdr projection");
+
+  const substituted = await desk();
+  const adoptedSource = join(substituted, `legacy_${sessionId}.jsonl`);
+  await writeFile(adoptedSource, "source");
+  await launchPiRuntime(substituted, seat, args(adoptedSource), { select: selectEconomy, command: fakeHerdr({ verifiedPath: adoptedSource }).command });
+  const bound = await readYaml<Record<string, any>>(paths(substituted).seatFile(seat));
+  const replacementReceipt = join(substituted, ".atdd-flow", "runtime-launch", "substituted.yaml");
+  await atomicYaml(replacementReceipt, { schema: "atdd-flow/pi-runtime-launch-receipt/v1", seat, pi_session: sessionId, pi_session_path: adoptedSource, herdr_session: "forge", pane: "w9:p9" });
+  await atomicYaml(paths(substituted).seatFile(seat), { ...bound, runtime: { ...bound.runtime, launch_receipt: replacementReceipt } });
+  await expect(launchPiRuntime(substituted, seat, ["--herdr-session", "forge", "--resume"], { select: selectEconomy, command: fakeHerdr({ verifiedPath: adoptedSource }).command }))
+    .rejects.toThrow("valid Flow launch receipt");
 });
 
 test("unavailable, low-confidence, or invalid Jev selection receipts the strongest fallback", async () => {
