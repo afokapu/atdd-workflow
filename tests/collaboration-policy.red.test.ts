@@ -3,7 +3,8 @@ import { mkdtemp, readFile, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { canonicalCollaborationPolicy, collaborationConventionPath, collaborationPolicyPointer, projectCollaborationPolicy, runtimeStartupInstruction } from "../src/collaboration-policy";
-import { init, migrate } from "../src/seats";
+import { init, initProject, migrate, spawn } from "../src/seats";
+import { post, startThread, status as threadStatus } from "../src/threads";
 
 const start = "<!-- atdd-flow:collaboration-policy:start -->";
 const end = "<!-- atdd-flow:collaboration-policy:end -->";
@@ -47,6 +48,30 @@ test("Desk init and migration projection create and repair the managed instructi
   await writeFile(join(root, "CLAUDE.md"), "user text\n", "utf8");
   await migrate(root);
   expect(await readFile(join(root, "CLAUDE.md"), "utf8")).toBe(`user text\n\n${managed}`);
+});
+
+test("an unresolved expects_result remains visible after later thread activity", async () => {
+  const root = await workspace();
+  await init(root, "demo", []);
+  await initProject(root, "demo");
+  await spawn(root, "demo", "coordinator", "main", ["--worktree", join(root, "coordinator")]);
+  await spawn(root, "demo", "driver", "worker", ["--worktree", join(root, "driver")]);
+  const thread = await startThread(root, ["--with", "coordinator@demo,driver.worker@demo", "--subject", "Outstanding request"]);
+  const request = await post(root, thread, ["--from", "coordinator@demo", "--to", "driver.worker@demo", "--expects-result", "--body", "Return evidence."]);
+  await post(root, thread, ["--from", "coordinator@demo", "--to", "driver.worker@demo", "--body", "Later work occurred."]);
+
+  const output: string[] = [];
+  const log = console.log;
+  console.log = (line: string) => { output.push(line); };
+  try { await threadStatus(root); }
+  finally { console.log = log; }
+  expect(output.join("\n")).toContain(`waiting:${request}@driver.worker@demo`);
+});
+
+test("canonical policy requires durable inbox reconciliation and main-only merge custody", () => {
+  const policy = canonicalCollaborationPolicy();
+  expect(policy).toContain("reconcile their durable inbox after every bounded action, phase completion, or wait");
+  expect(policy).toContain("Only main@project executes that project repository merge");
 });
 
 test("Pi startup resolves the canonical collaboration policy rather than a duplicated runtime copy", () => {
