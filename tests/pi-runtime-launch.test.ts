@@ -201,6 +201,20 @@ test("RED: explicit exact-session adoption needs a released source, backup hash,
     .rejects.toThrow("already used");
 });
 
+test("RED: adoption does not run or start a target Pi when the required source backup fails", async () => {
+  const root = await desk();
+  const source = join(root, `missing_${sessionId}.jsonl`);
+  const authorization = await operatorAuthorization(root, source);
+  const herdr = fakeHerdr({ verifiedPath: source });
+  await expect(launchPiRuntime(root, seat, [
+    "--pane", "w1:p2", "--herdr-session", "forge", "--adopt-session", source,
+    "--source-herdr-session", "legacy", "--source-pane", "w1:p2", "--authorization", authorization,
+  ], { select: selectEconomy, command: herdr.command })).rejects.toThrow();
+  const commands = herdr.calls.map((call) => call.join(" "));
+  expect(commands).not.toContainEqual(expect.stringContaining("pane run"));
+  expect(commands).not.toContainEqual(expect.stringContaining("agent start"));
+});
+
 test("RED: adoption validates an immutable operator authorization bound to the exact tuple before projection", async () => {
   const root = await desk();
   const source = join(root, `legacy_${sessionId}.jsonl`);

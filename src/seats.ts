@@ -376,6 +376,9 @@ export async function launchPiRuntime(root: string, address: string, args: strin
   const request: HerdrRequest = { session: herdrSession, pane, seat: resolved, root, piSession, ...(priorSessionPath ? { sessionPath: priorSessionPath } : {}), resume: resume || adopting, args: [...model.args, "--extension", piExtensionPath()] };
   const plan = { candidate: selection.candidate.id, piSession, pane, herdrSession, receipt: receiptPath(root, piSession), command: startCommand(request), ...(dryRun ? { dryRun: true } : {}) };
   if (dryRun) return plan;
+  // The source snapshot is a pre-migration prerequisite: never start a target
+  // Pi when its immutable recovery copy cannot be created.
+  const relocation = adopting ? await immutableSessionBackup(root, required(canonicalAdoptedSessionPath, "an exact adopted Pi session path"), piSession) : undefined;
   await command(herdr(herdrSession, "pane", "run", pane, `export ATDD_WORKFLOW_ROOT=${shellQuote(root)} ATDD_WORKFLOW_SEAT=${shellQuote(resolved)} ATDD_FLOW_PI_SESSION=${shellQuote(piSession)} ATDD_FLOW_HERDR_SESSION=${shellQuote(herdrSession)} ATDD_FLOW_HERDR_PANE=${shellQuote(pane)}`));
   await command(startCommand(request));
   const [agentRaw, verifiedPaneRaw, verifiedProcessRaw] = await Promise.all([command(herdr(herdrSession, "agent", "get", agentName(resolved))), command(herdr(herdrSession, "pane", "get", pane)), command(herdr(herdrSession, "pane", "process-info", "--pane", pane))]);
@@ -389,7 +392,6 @@ export async function launchPiRuntime(root: string, address: string, args: strin
   if ((resume || adopting) && sessionPath !== priorSessionPath) throw new Error("Herdr did not verify the exact requested Pi session path; seat binding was not changed.");
   if (agent.name !== agentName(resolved) || agent.pane !== pane || ![agent.status, verifiedPane.status].every((status) => status === "idle" || status === "done") || verifiedPane.pane !== pane || !verifiedProcess) throw new Error("Herdr did not verify the replacement Pi process; seat binding was not changed.");
   const receipt = plan.receipt;
-  const relocation = adopting ? await immutableSessionBackup(root, required(canonicalAdoptedSessionPath, "an exact adopted Pi session path"), piSession) : undefined;
   const receiptRecord = {
     schema: "atdd-flow/pi-runtime-launch-receipt/v1", seat: resolved, tasks: active.map((entry) => entry.id), candidate: selection.candidate.id,
     selection: selection.fallback ? { result: "fallback", reason: selection.fallback } : { result: "selected", confidence: selection.selection.confidence, ...(selection.selection.available && selection.selection.model ? { model: selection.selection.model } : {}) },
