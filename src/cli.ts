@@ -11,6 +11,7 @@ import * as reviews from "./reviews";
 import { status } from "./overview";
 import { multiplexer } from "./multiplexer";
 import * as cleanup from "./ephemeral-resources";
+import * as ownerAlerts from "./owner-escalations";
 
 const usage = `atdd-flow — filesystem-first agent seats and tasks
 
@@ -45,6 +46,8 @@ Usage:
   atdd-flow task open <project> <task-id>
   atdd-flow cleanup status <project>
   atdd-flow cleanup checklist <project> <task-id>
+  atdd-flow owner-alert scan --by <coordinator-or-main> [--re-notify-after-ms <milliseconds>]
+  atdd-flow owner-alert deliver|acknowledge|execute|resolve <alert-id> --by <address> [--note <text>|--option <id>|--reason <text>]
   atdd-flow thread start --with <address,...> --subject <text> [--task <project/task-id>]
   atdd-flow thread add <thread-id> <address>
   atdd-flow thread open <thread-id>
@@ -127,6 +130,20 @@ async function main() {
       if (subcommand === "status") return console.log(Bun.YAML.stringify(await cleanup.coordinatorStatus(root, required(projectName, "project"))));
       if (subcommand === "checklist") return console.log(await cleanup.checklist(root, { project: required(projectName, "project"), task: required(taskId, "task id") }));
       throw new Error("Use `atdd-flow cleanup status <project>` or `atdd-flow cleanup checklist <project> <task-id>`.");
+    },
+    "owner-alert": async () => {
+      const [subcommand, alertId, ...tail] = rest;
+      if (subcommand === "scan") {
+        const delay = words(rest.slice(1), "--re-notify-after-ms");
+        if (delay !== undefined && (!Number.isSafeInteger(Number(delay)) || Number(delay) < 0)) throw new Error("--re-notify-after-ms must be a non-negative integer.");
+        return console.log(Bun.YAML.stringify(await ownerAlerts.scanOwnerAlerts(root, { by: required(words(rest.slice(1), "--by"), "--by"), ...(delay === undefined ? {} : { re_notify_after_ms: Number(delay) }) })));
+      }
+      const by = required(words(tail, "--by"), "--by");
+      if (subcommand === "deliver") return ownerAlerts.deliverOwnerAlert(root, required(alertId, "alert id"), { by });
+      if (subcommand === "acknowledge") return ownerAlerts.acknowledgeOwnerAlert(root, required(alertId, "alert id"), { by, note: required(words(tail, "--note"), "--note") });
+      if (subcommand === "execute") return ownerAlerts.chooseOwnerAlertOption(root, required(alertId, "alert id"), { by, option: required(words(tail, "--option"), "--option") as "authorize-safe-fallback" | "provide-cross-project-decision" | "hold-or-resolve" });
+      if (subcommand === "resolve") return ownerAlerts.resolveOwnerAlert(root, required(alertId, "alert id"), { by, reason: required(words(tail, "--reason"), "--reason") });
+      throw new Error("Use `atdd-flow owner-alert scan|deliver|acknowledge|execute|resolve ...`.");
     },
     thread: async () => {
       const [subcommand, ...tail] = rest;
