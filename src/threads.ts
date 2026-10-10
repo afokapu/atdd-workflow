@@ -8,6 +8,15 @@ import {
 
 export type Thread = { schema: string; id: string; subject: string; participants: string[]; state: "open" | "closed"; summary?: string; task?: string };
 export type Kind = "message" | "receipt" | "result";
+export type TransferAuthorization = {
+  schema: "atdd-workflow/task-transfer-authorization/v1";
+  project: string;
+  task: string;
+  from: string;
+  to: string;
+  reason: string;
+  exact_head: { branch: string; commit: string };
+};
 export type Message = {
   schema: string;
   id: string;
@@ -18,6 +27,8 @@ export type Message = {
   expects_result?: boolean;
   created_at: string;
   body: string;
+  /** Immutable owner authorization for one exact coordinator-transfer tuple. */
+  authorization?: TransferAuthorization;
 };
 
 async function thread(root: string, threadId: string) {
@@ -212,6 +223,21 @@ async function inject(root: string, address: string, message: Message, threadId:
   catch (error) { console.warn(`Notification for ${address} was not delivered: ${(error as Error).message}`); }
 }
 
+function transferAuthorization(args: string[], from: string) {
+  const encoded = words(args, "--task-transfer-authorization");
+  if (!encoded) return undefined;
+  if (from !== "operator@desk") throw new Error("Only operator@desk may create a task transfer authorization.");
+  let authorization: unknown;
+  try { authorization = JSON.parse(encoded); }
+  catch { throw new Error("--task-transfer-authorization must be valid JSON."); }
+  const value = authorization as Partial<TransferAuthorization>;
+  if (!value || value.schema !== "atdd-workflow/task-transfer-authorization/v1"
+    || ![value.project, value.task, value.from, value.to, value.reason, value.exact_head?.branch, value.exact_head?.commit].every((entry) => typeof entry === "string" && entry.length)) {
+    throw new Error("--task-transfer-authorization must contain one exact task-transfer-authorization/v1 tuple.");
+  }
+  return value as TransferAuthorization;
+}
+
 async function post(root: string, threadId: string, args: string[], overrides: Partial<Message> = {}) {
   const record = await thread(root, threadId);
   const from = await canonicalAddress(root, required(overrides.from ?? words(args, "--from"), "--from"));
@@ -221,11 +247,13 @@ async function post(root: string, threadId: string, args: string[], overrides: P
   if (recipients.some((address) => !record.participants.includes(address))) throw new Error("Recipients must be thread participants.");
   await assertRoute(root, from, recipients.filter((address) => address !== from));
   const kind = overrides.kind ?? "message";
+  const authorization = overrides.authorization ?? transferAuthorization(args, from);
   // Labels are an explicit, non-sensitive operator hint; message bodies never enter durable IDs.
   const label = words(args, "--label") ?? kind;
   const message: Message = {
     schema: "atdd-workflow/message/v1", id: id("M", label), from, to: toValue === "all" ? "all" : recipients,
     kind,
+    ...(authorization ? { authorization } : {}),
     ...(overrides.in_reply_to ? { in_reply_to: overrides.in_reply_to } : {}),
     ...(overrides.expects_result || has(args, "--expects-result") ? { expects_result: true } : {}),
     created_at: now(), body: required(overrides.body ?? words(args, "--body"), "--body"),

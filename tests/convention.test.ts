@@ -19,4 +19,8 @@ test("workflow lifecycle convention remains valid and carries the focus discipli
   expect(convention.content.normative_text).toContain("review -> done");
   expect(convention.content.normative_text).toContain("`operator@desk` is the human authority");
   expect(convention.content.normative_text).toMatch(/Drivers send normal work\s+messages to their coordinator/);
+  expect(convention.content.normative_text).toContain("atdd-flow task transfer");
+  expect(convention.content.normative_text).toContain("operator@desk");
+  expect(convention.content.normative_text).toContain("never moves or changes any seat");
+  expect(convention.content.normative_text).toContain("task-transfer-authorization/v1");
 });

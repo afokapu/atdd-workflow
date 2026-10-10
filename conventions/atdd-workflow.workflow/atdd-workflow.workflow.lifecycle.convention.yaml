@@ -77,6 +77,17 @@ content:
     coordinator lineage, mismatched base/worktree placement, and ambiguous placement rather than
     guessing. Legacy seat, task, and thread identities remain readable without rename or mutation.
 
+    Transfer active task accountability only through `atdd-flow task transfer`, never by rewriting
+    task YAML. The transition retains append-only from/to/reason/exact-head/effective-time provenance
+    and leaves prior task, phase, review, and message evidence attributable. The current coordinator
+    may transfer, while main requires one applicable immutable `operator@desk`
+    `task-transfer-authorization/v1` message. Its project, task, from, to, reason, and exact target
+    branch/head must match the requested transfer before mutation; only `operator@desk` may create
+    that typed authorization. Accept only main or a valid named integration coordinator; atomically
+    derive the new governed base from that accepted target head. Reject same-target, duplicate, nested, mismatched,
+    unauthorized, or manually rewritten transfers. A transfer never moves or changes any seat, branch,
+    runtime binding, worktree, dirty state, or evidence artifact.
+
     Drivers hand work back to their named coordinator for integration and validation. The named
     coordinator hands a reviewed integration candidate to main; only main completes normal
     integration-to-main gates and publication. No automatic merge executor, branch graph, daemon, or
