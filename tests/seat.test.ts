@@ -1,5 +1,5 @@
 import { afterEach, expect, test as bunTest } from "bun:test";
-import { chmod, mkdir, mkdtemp, readFile, rename, rm, stat, symlink, writeFile } from "node:fs/promises";
+import { chmod, mkdir, mkdtemp, readFile, readdir, rename, rm, stat, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { discoverAddress, launchCommand, launchedAddress, notificationCommand } from "../src/adapters";
@@ -7,7 +7,7 @@ import { atomicYaml, id } from "../src/core";
 import { registerRuntimeState } from "../src/runtime-state";
 import { addressedTo, createInboxReconciler, mailNotice } from "../extensions/pi/index";
 import { isPiExecutable, launchNotice, piLaunchArgs, resolveExecutable } from "../src/seats";
-import { enqueueNativeMail } from "../src/threads";
+import { enqueueNativeMail, publishNativeMail } from "../src/threads";
 import { parse } from "yaml";
 
 const roots: string[] = [];
@@ -180,6 +180,59 @@ test("durable inbox reconciliation recovers missed mail without duplicate delive
   await restarted.reconcile();
   expect(delivered).toEqual([first, second, third, delayed, later]);
   expect(await Bun.file(join(site, ".atdd-flow", "pi-inbox", "driver.pi%40demo", "pending", `${later}.yaml`)).exists()).toBe(false);
+});
+
+test("RED: active native post and receipt recover a queue deleted after drain without duplicate delivery", async () => {
+  const root = await mkdtemp(join(tmpdir(), "atdd-workflow-"));
+  roots.push(root);
+  const site = join(root, "site");
+  await run(root, "init", site);
+  await run(site, "project", "init", "demo");
+  await run(site, "spawn", "demo", "coordinator", "main", "--worktree", "/tmp/demo-main");
+  await run(site, "spawn", "demo", "driver", "pi", "--worktree", "/tmp/demo-pi");
+  const coordinator = "coordinator@demo";
+  const driver = "driver.pi@demo";
+  await run(site, "bind", coordinator, "--application", "herdr", "--address", "w-test:p-coordinator", "--wake", "native");
+  await run(site, "bind", driver, "--application", "herdr", "--address", "w-test:p-driver", "--wake", "native");
+  const thread = await run(site, "thread", "start", "--with", `${coordinator},${driver}`, "--subject", "Drained native inbox");
+  const inbox = (seat: string) => join(site, ".atdd-flow", "pi-inbox", encodeURIComponent(seat));
+  const coordinatorDelivered: string[] = [];
+  const driverDelivered: string[] = [];
+  const coordinatorInbox = createInboxReconciler({ root: site, seat: coordinator, deliver: async (mail) => { coordinatorDelivered.push(mail.id); } });
+  const driverInbox = createInboxReconciler({ root: site, seat: driver, deliver: async (mail) => { driverDelivered.push(mail.id); } });
+
+  const priming = await run(site, "post", thread, "--from", driver, "--to", coordinator, "--body", "Drain the coordinator inbox.");
+  await coordinatorInbox.reconcile();
+  const first = await run(site, "post", thread, "--from", coordinator, "--to", driver, "--body", "Drain the driver inbox.");
+  await driverInbox.reconcile();
+  expect(await Bun.file(join(inbox(coordinator), "queue.yaml")).exists()).toBe(false);
+  expect(await Bun.file(join(inbox(driver), "queue.yaml")).exists()).toBe(false);
+
+  const second = await run(site, "post", thread, "--from", coordinator, "--to", driver, "--body", "Restore the drained inbox through post.");
+  await driverInbox.reconcile();
+  const reply = await run(site, "receipt", thread, second, "--from", driver, "--body", "Restore the drained inbox through receipt.");
+  await coordinatorInbox.reconcile();
+  await coordinatorInbox.reconcile();
+  await driverInbox.reconcile();
+  expect(driverDelivered).toEqual([first, second]);
+  expect(coordinatorDelivered).toEqual([priming, reply]);
+
+  // The reconciler can drain after durable message persistence but before the
+  // advisory publish marker. The absent queue is successful delivery.
+  const afterDrain = "M-after-drain";
+  const segment = await enqueueNativeMail(site, driver, { thread, message: afterDrain, created_at: new Date().toISOString() });
+  await atomicYaml(join(site, "threads", thread, `${afterDrain}.yaml`), {
+    schema: "atdd-workflow/message/v1", id: afterDrain, from: coordinator, to: [driver], kind: "message", created_at: new Date().toISOString(), body: "Durably attributable before marker.",
+  });
+  await rm(join(inbox(driver), "queue.yaml"));
+  await rm(join(inbox(driver), "pending", `${segment}.yaml`));
+  await expect(publishNativeMail(site, driver, segment, afterDrain)).resolves.toBeUndefined();
+  expect(await Bun.file(join(site, "threads", thread, `${afterDrain}.yaml`)).exists()).toBe(true);
+
+  await writeFile(join(inbox(driver), "queue.yaml"), "schema: atdd-flow/pi-inbox-queue/v1\nhead: 42\ntail: S-competing\n");
+  const beforeMalformedPost = (await readdir(join(site, "threads", thread))).filter((file) => file.startsWith("M-")).sort();
+  expect(await fail(site, "post", thread, "--from", coordinator, "--to", driver, "--body", "Must fail closed.")).toContain("Malformed pending inbox queue");
+  expect((await readdir(join(site, "threads", thread))).filter((file) => file.startsWith("M-")).sort()).toEqual(beforeMalformedPost);
 });
 
 test("a Pi-designated unbound seat queues ordered native mail in bounded segments", async () => {
