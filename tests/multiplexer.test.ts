@@ -25,9 +25,13 @@ async function desk() {
   const repository = join(root, "repo");
   const integration = join(root, "integration");
   const driver = join(root, "driver");
-  await Promise.all([mkdir(repository), mkdir(integration), mkdir(driver)]);
-  await run(root, "init", site);
-  await run(site, "project", "init", "demo");
+  const seats = join(site, "work", "demo", "seats");
+  const tasks = join(site, "work", "demo", "tasks");
+  await Promise.all([
+    mkdir(repository), mkdir(integration), mkdir(driver), mkdir(tasks, { recursive: true }),
+    ...["main", "coordinator.primary", "coordinator.integration", "driver.active"].map((name) => mkdir(join(seats, name), { recursive: true })),
+  ]);
+  await writeFile(join(site, "desk.yaml"), "schema: atdd-workflow/desk/v1\ndesk: demo\napplication: herdr\n");
   await writeFile(join(site, "work", "demo", "project.yaml"), `schema: atdd-workflow/project/v1
 project: demo
 repository: ${repository}
@@ -36,11 +40,37 @@ roles:
   coordinator: { address: "coordinator.{name}@{project}", branch: main, worktree: "{repository}" }
   driver: { address: "driver.{name}@{project}", branch: "delivery/{name}", worktree: "${driver}" }
 `);
-  await run(site, "spawn", "demo", "main", "primary", "--worktree", repository);
-  await run(site, "spawn", "demo", "coordinator", "primary", "--worktree", repository);
-  await run(site, "spawn", "demo", "coordinator", "integration", "--worktree", integration);
-  await run(site, "spawn", "demo", "driver", "active", "--worktree", driver);
-  await run(site, "task", "add", "demo", "W-active", "--title", "Active", "--coordinator", "coordinator.primary@demo", "--assignee", "driver.active@demo", "--done-when", "Delivered");
+  await Promise.all([
+    writeFile(join(seats, "main", "seat.yaml"), `schema: atdd-workflow/seat/v2
+address: main@demo
+role: main
+project: demo
+worktree: ${repository}
+branch: main
+`),
+    writeFile(join(seats, "coordinator.primary", "seat.yaml"), `schema: atdd-workflow/seat/v2
+address: coordinator.primary@demo
+role: coordinator
+project: demo
+worktree: ${repository}
+branch: main
+`),
+    writeFile(join(seats, "coordinator.integration", "seat.yaml"), `schema: atdd-workflow/seat/v2
+address: coordinator.integration@demo
+role: coordinator
+project: demo
+worktree: ${integration}
+branch: main
+`),
+    writeFile(join(seats, "driver.active", "seat.yaml"), `schema: atdd-workflow/seat/v2
+address: driver.active@demo
+role: driver
+project: demo
+worktree: ${driver}
+branch: delivery/active
+`),
+    writeFile(join(tasks, "W-active.yaml"), "schema: atdd-workflow/task/v1\ntitle: Active\nstatus: todo\ncoordinator: coordinator.primary@demo\nassignee: driver.active@demo\ndone_when: [{ text: Delivered }]\n"),
+  ]);
   return { root, site, repository, integration, driver };
 }
 
