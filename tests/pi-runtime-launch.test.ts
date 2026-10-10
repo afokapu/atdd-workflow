@@ -51,13 +51,17 @@ async function priorRuntime(root: string) {
   await atomicYaml(paths(root).seatFile(seat), saved);
 }
 
-function fakeHerdr(options: { released?: boolean; sourceLive?: boolean; verifiedPath?: string; agentLifecycle?: { key?: "agent_status" | "status" | "state"; value?: string } } = {}) {
+function fakeHerdr(options: { released?: boolean; sourceLive?: boolean; verifiedPath?: string; seat?: string; primary?: string; worktree?: string; agentLifecycle?: { key?: "agent_status" | "status" | "state"; value?: string } } = {}) {
   const calls: string[][] = [];
   let started = false;
   let requestedId = sessionId;
+  const targetSeat = options.seat ?? seat;
+  const primary = options.primary ?? "/work/primary";
+  const worktree = options.worktree ?? "/work/demo";
+  const agent = `flow-${targetSeat.replace(/[^a-z0-9_-]/gi, "-").toLowerCase()}`.slice(0, 32);
   const lifecycle = options.agentLifecycle ?? { key: "status", value: "idle" };
-  const shell = { pane_id: "w1:p2", agent: options.released === false ? "flow-driver-runtime-demo" : null, agent_status: "unknown", agent_session: null };
-  const running = () => ({ pane_id: "w1:p2", agent: "flow-driver-runtime-demo", agent_status: "idle", agent_session: { source: "pi", agent: "flow-driver-runtime-demo", kind: "path", value: options.verifiedPath ?? sessionPath } });
+  const shell = { pane_id: "w1:p2", agent: options.released === false ? agent : null, agent_status: "unknown", agent_session: null };
+  const running = () => ({ pane_id: "w1:p2", agent, agent_status: "idle", agent_session: { source: "pi", agent, kind: "path", value: options.verifiedPath ?? sessionPath } });
   return {
     calls,
     command: async (command: string[]) => {
@@ -65,11 +69,11 @@ function fakeHerdr(options: { released?: boolean; sourceLive?: boolean; verified
       const session = command[2];
       const args = command.slice(3);
       if (args[0] === "workspace" && args[1] === "list") return JSON.stringify({ result: { workspaces: [
-        { workspace_id: "w1", label: "demo", worktree: { checkout_path: "/work/primary" } },
-        { workspace_id: "w2", label: seat, worktree: { checkout_path: "/work/demo" } },
+        { workspace_id: "w1", label: "demo", worktree: { checkout_path: primary } },
+        { workspace_id: "w2", label: targetSeat, worktree: { checkout_path: worktree } },
       ] } });
-      if (args[0] === "tab" && args[1] === "list") return JSON.stringify({ result: { tabs: [{ tab_id: "w2:t1", workspace_id: "w2", label: seat }] } });
-      if (args[0] === "pane" && args[1] === "list") return JSON.stringify({ result: { panes: [{ pane_id: "w1:p2", tab_id: "w2:t1", label: seat }] } });
+      if (args[0] === "tab" && args[1] === "list") return JSON.stringify({ result: { tabs: [{ tab_id: "w2:t1", workspace_id: "w2", label: targetSeat }] } });
+      if (args[0] === "pane" && args[1] === "list") return JSON.stringify({ result: { panes: [{ pane_id: "w1:p2", tab_id: "w2:t1", label: targetSeat }] } });
       if (args[0] === "pane" && args[1] === "get") return JSON.stringify({ result: { pane: started || (session !== "forge" && options.sourceLive) ? running() : shell } });
       if (args[0] === "pane" && args[1] === "process-info") return JSON.stringify({ result: { process_info: {
         pane_id: "w1:p2", shell_pid: 11,
@@ -82,9 +86,9 @@ function fakeHerdr(options: { released?: boolean; sourceLive?: boolean; verified
         const id = piArgs.indexOf("--session-id");
         requestedId = id >= 0 ? piArgs[id + 1]! : sessionId;
         started = true;
-        return JSON.stringify({ result: { name: "flow-driver-runtime-demo" } });
+        return JSON.stringify({ result: { name: agent } });
       }
-      if (args[0] === "agent" && args[1] === "get") return JSON.stringify({ result: { agent: { name: "flow-driver-runtime-demo", pane_id: "w1:p2", ...(lifecycle.key && lifecycle.value ? { [lifecycle.key]: lifecycle.value } : {}) } } });
+      if (args[0] === "agent" && args[1] === "get") return JSON.stringify({ result: { agent: { name: agent, pane_id: "w1:p2", ...(lifecycle.key && lifecycle.value ? { [lifecycle.key]: lifecycle.value } : {}) } } });
       throw new Error(`unexpected Herdr command: ${command.join(" ")}`);
     },
     requestedId: () => requestedId,
@@ -339,10 +343,57 @@ test("launch eligibility admits assigned active or dependency-ready TODO without
   await refuse({ status: "invalid" });
 });
 
-test("RED: a correctly modeled named coordinator with coordinator-owned READY work launches", async () => {
+test("named coordinator launches from its exact integration accountability, while invalid coordinator topology remains ineligible", async () => {
+  const launch = (root: string) => launchPiRuntime(root, coordinatorSeat, ["--pane", "w1:p2", "--herdr-session", "forge"], {
+    select: selectEconomy,
+    command: fakeHerdr({ seat: coordinatorSeat, primary: coordinatorPrimary, worktree: coordinatorWorktree }).command,
+    sessionId: () => sessionId,
+  });
   const root = await coordinatorDesk();
-  await expect(launchPiRuntime(root, coordinatorSeat, ["--pane", "w1:p2", "--herdr-session", "forge", "--dry-run"], {
-    select: selectEconomy, command: fakeHerdr().command, sessionId: () => sessionId,
+  const result = await launch(root);
+  expect(await readFile(result.receipt, "utf8")).toContain("coordinate");
+  expect((await readYaml<Record<string, any>>(paths(root).seatFile(coordinatorSeat))).runtime).toMatchObject({
+    pi_session: sessionId,
+    pi_session_path: sessionPath,
+    wake: "native",
+    launch_receipt: result.receipt,
+  });
+
+  const reject = async (mutate: (root: string) => Promise<void>) => {
+    const denied = await coordinatorDesk();
+    await mutate(denied);
+    await expect(launch(denied)).rejects.toThrow("launch-eligible task");
+  };
+  await reject(async (denied) => {
+    const task = await readYaml<Record<string, unknown>>(paths(denied).taskFile("demo", "coordinate"));
+    await atomicYaml(paths(denied).taskFile("demo", "coordinate"), { ...task, blocker: "Awaiting an external decision." });
+  });
+  await reject(async (denied) => {
+    const task = await readYaml<Record<string, unknown>>(paths(denied).taskFile("demo", "coordinate"));
+    await atomicYaml(paths(denied).taskFile("demo", "coordinate"), { ...task, coordinator: "coordinator.generic@demo" });
+  });
+  await reject(async (denied) => {
+    const record = await readYaml<Record<string, unknown>>(paths(denied).seatFile(coordinatorSeat));
+    await atomicYaml(paths(denied).seatFile(coordinatorSeat), { ...record, branch: "main" });
+  });
+  await reject(async (denied) => {
+    const record = await readYaml<Record<string, unknown>>(paths(denied).seatFile(coordinatorSeat));
+    await atomicYaml(paths(denied).seatFile("coordinator.duplicate@demo"), { ...record, address: "coordinator.duplicate@demo" });
+  });
+  await reject(async (denied) => {
+    const record = await readYaml<Record<string, unknown>>(paths(denied).seatFile(coordinatorSeat));
+    await atomicYaml(paths(denied).seatFile(coordinatorSeat), { ...record, address: "coordinator.payments.nested@demo", branch: "integration/payments/nested" });
+    const task = await readYaml<Record<string, unknown>>(paths(denied).taskFile("demo", "coordinate"));
+    await atomicYaml(paths(denied).taskFile("demo", "coordinate"), { ...task, coordinator: "coordinator.payments.nested@demo" });
+  });
+
+  const active = await coordinatorDesk();
+  const task = await readYaml<Record<string, unknown>>(paths(active).taskFile("demo", "coordinate"));
+  await atomicYaml(paths(active).taskFile("demo", "coordinate"), { ...task, status: "in_progress" });
+  await expect(launchPiRuntime(active, coordinatorSeat, ["--pane", "w1:p2", "--herdr-session", "forge", "--dry-run"], {
+    select: selectEconomy,
+    command: fakeHerdr({ seat: coordinatorSeat, primary: coordinatorPrimary, worktree: coordinatorWorktree }).command,
+    sessionId: () => sessionId,
   })).resolves.toMatchObject({ dryRun: true });
 });
 

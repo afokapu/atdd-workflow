@@ -218,10 +218,37 @@ export function resolveModelCommand(config: Desk, candidate: ModelCandidate) {
   return { agent: resolveExecutable(config, candidate.executable), args: candidate.args ?? [] };
 }
 
-async function launchEligibleTasks(root: string, record: Seat) {
+async function isExactNamedCoordinator(root: string, record: Seat, address: string) {
+  if (record.address !== address || record.role !== "coordinator") return false;
+  const config = await project(root, record.project);
+  const role = config.roles.coordinator;
+  const suffix = `@${config.project}`;
+  const local = record.address.endsWith(suffix) ? record.address.slice(0, -suffix.length) : "";
+  const match = local.match(/^coordinator\.([a-z0-9_-]+)$/);
+  if (!config.repository || role?.address !== "coordinator.{name}@{project}" || role.branch !== "integration/{name}" || !role.worktree || !match) return false;
+  const stream = match[1]!;
+  const expectedWorktree = resolve(fill(role.worktree, {
+    project: config.project, name: stream, worktree_root: config.worktree_root ?? "", repository: config.repository,
+  }));
+  if (record.branch !== `integration/${stream}` || resolve(record.worktree) !== expectedWorktree || expectedWorktree === resolve(config.repository)) return false;
+
+  try {
+    const peers = await Promise.all((await readdir(paths(root).seats(config.project))).map(async (name) => {
+      try { return await readYaml<Seat>(join(paths(root).seats(config.project), name, "seat.yaml")); }
+      catch { return undefined; }
+    }));
+    return !peers.some((peer) => peer && peer.address !== record.address && peer.role === "coordinator"
+      && (peer.branch === record.branch || resolve(peer.worktree) === expectedWorktree));
+  } catch { return false; }
+}
+
+async function launchEligibleTasks(root: string, record: Seat, address: string) {
+  const coordinator = await isExactNamedCoordinator(root, record, address);
   const tasks = await seatTasks(root, record.project, record.address);
   const eligible = await Promise.all(tasks.map(async (entry) => {
-    if (entry.task.assignee !== record.address || entry.task.blocker) return undefined;
+    const accountable = record.role === "driver" ? entry.task.assignee === record.address
+      : coordinator && entry.task.coordinator === record.address;
+    if (!accountable || entry.task.blocker) return undefined;
     if (entry.task.status === "in_progress") return entry;
     if (entry.task.status !== "todo") return undefined;
     const dependencies = await Promise.all((entry.task.depends_on ?? []).map(async (id) => {
@@ -357,7 +384,7 @@ export async function launchPiRuntime(root: string, address: string, args: strin
   if (resume && ((requestedPane && requestedPane !== existingPane) || herdrSession !== existingSession)) {
     throw new Error("Resume cannot relocate a Pi session across a Herdr session or pane; use explicit exact-session adoption.");
   }
-  const active = await launchEligibleTasks(root, record);
+  const active = await launchEligibleTasks(root, record, resolved);
   if (!active.length) throw new Error(`${resolved} has no launch-eligible task; refusing runtime launch.`);
   const selection = await chooseLaunchModel(root, config, record, required(await modelPortfolio(root), "models.yaml for Pi runtime launch"), dependencies.select);
   const model = resolveModelCommand(config, selection.candidate);
