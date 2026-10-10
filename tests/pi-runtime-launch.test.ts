@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { atomicYaml, paths, readYaml } from "../src/core";
 import { launchPiRuntime } from "../src/seats";
+import { createExactSessionAdoptionAuthorization } from "../src/adoption-authorizations";
 import { block, unblock } from "../src/tasks";
 
 const roots: string[] = [];
@@ -27,16 +28,19 @@ async function desk() {
   return root;
 }
 
+let authorizationCount = 0;
 async function operatorAuthorization(root: string, sessionPath: string, overrides: Record<string, unknown> = {}, sender = "operator@desk") {
-  const thread = "T-adoption-authorization";
-  const message = "M-adoption-authorization";
-  const authorization = {
-    schema: "atdd-flow/pi-session-adoption-authorization/v1", seat, pi_session: sessionId, pi_session_path: sessionPath,
-    source: { herdr_session: "legacy", pane: "w1:p2" }, target: { herdr_session: "forge", pane: "w1:p2" }, ...overrides,
-  };
-  await atomicYaml(paths(root).threadFile(thread), { schema: "atdd-workflow/thread/v1", id: thread, subject: "Exact adoption authorization", participants: ["operator@desk"], state: "open" });
-  await atomicYaml(paths(root).message(thread, message), { schema: "atdd-workflow/message/v1", id: message, from: sender, to: [seat], kind: "message", created_at: "2026-10-10T14:30:00.000Z", body: JSON.stringify(authorization) });
-  return message;
+  const id = `A-adoption-${authorizationCount += 1}`;
+  await createExactSessionAdoptionAuthorization(root, id, [
+    "--by", "operator@desk", "--seat", seat, "--pi-session", sessionId, "--pi-session-path", sessionPath,
+    "--source-herdr-session", "legacy", "--source-pane", "w1:p2", "--target-herdr-session", "forge", "--target-pane", "w1:p2", "--target-cwd", "/work/demo",
+  ]);
+  if (Object.keys(overrides).length || sender !== "operator@desk") {
+    const file = join(root, ".atdd-flow", "exact-session-adoption-authorizations", `${id}.yaml`);
+    const record = await readYaml<Record<string, unknown>>(file);
+    await atomicYaml(file, { ...record, issued_by: sender, ...overrides });
+  }
+  return id;
 }
 
 async function priorRuntime(root: string) {
@@ -189,10 +193,12 @@ test("RED: explicit exact-session adoption needs a released source, backup hash,
   ], { select: selectEconomy, command: fakeHerdr({ verifiedPath: source }).command });
   const receipt = await readYaml<Record<string, unknown>>(result.receipt);
   expect(receipt).toMatchObject({ pi_session: sessionId, pi_session_path: source, relocation: {
-    source_herdr_session: "legacy", source_pane: "w1:p2", authorization_message: authorization,
+    source_herdr_session: "legacy", source_pane: "w1:p2", authorization: { id: authorization },
   } });
   expect(typeof (receipt.relocation as Record<string, unknown>).backup_sha256).toBe("string");
   expect(await Bun.file((receipt.relocation as Record<string, string>).backup).exists()).toBe(true);
+  await expect(launchPiRuntime(root, seat, ["--pane", "w1:p2", "--herdr-session", "forge", "--adopt-session", source, "--source-herdr-session", "legacy", "--source-pane", "w1:p2", "--authorization", authorization], { select: selectEconomy, command: fakeHerdr({ verifiedPath: source }).command }))
+    .rejects.toThrow("already used");
 });
 
 test("RED: adoption validates an immutable operator authorization bound to the exact tuple before projection", async () => {
@@ -202,7 +208,8 @@ test("RED: adoption validates an immutable operator authorization bound to the e
   const cases: Array<{ name: string; authorization: () => Promise<string> }> = [
     { name: "nonexistent", authorization: async () => "M-missing" },
     { name: "wrong sender", authorization: () => operatorAuthorization(root, source, {}, "coordinator@demo") },
-    { name: "mutable/non-schema body", authorization: () => operatorAuthorization(root, source, { schema: "untrusted" }) },
+    { name: "mutable record", authorization: () => operatorAuthorization(root, source, { created_at: "2026-10-11T00:00:00.000Z" }) },
+    { name: "non-schema record", authorization: () => operatorAuthorization(root, source, { schema: "untrusted" }) },
     { name: "wrong seat", authorization: () => operatorAuthorization(root, source, { seat: "driver.other@demo" }) },
     { name: "wrong session", authorization: () => operatorAuthorization(root, source, { pi_session: "01a99999-6789-7abc-8def-0123456789ab" }) },
     { name: "wrong source", authorization: () => operatorAuthorization(root, source, { source: { herdr_session: "other", pane: "w1:p2" } }) },
@@ -232,7 +239,7 @@ test("exact-session adoption fails closed for live sources, wrong targets, missi
   await expect(launchPiRuntime(missingAuthorization, seat, args(unauthorizedSource, unauthorized).filter((value) => value !== "--authorization" && value !== unauthorized), { select: selectEconomy, command: fakeHerdr().command }))
     .rejects.toThrow("requires --adopt-session");
   await expect(launchPiRuntime(missingAuthorization, seat, args(unauthorizedSource, unauthorized, "w9:p9"), { select: selectEconomy, command: fakeHerdr().command }))
-    .rejects.toThrow("does not match the seat-scoped Herdr projection");
+    .rejects.toThrow("immutable operator authorization record bound to the exact adoption tuple");
 
   const substituted = await desk();
   const adoptedSource = join(substituted, `legacy_${sessionId}.jsonl`);

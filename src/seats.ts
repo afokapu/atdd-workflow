@@ -12,6 +12,7 @@ import { type ModelSelectionInput, type ModelSelectionResponse, selectModel } fr
 import { seatTasks } from "./tasks";
 import { projectHerdrSeat } from "./multiplexer";
 import { isRuntimeStateStale, readRuntimeState } from "./runtime-state";
+import { resolveExactSessionAdoptionAuthorization } from "./adoption-authorizations";
 
 const lifecycleConventionPath = "conventions/atdd-workflow.workflow/atdd-workflow.workflow.lifecycle.convention.yaml";
 
@@ -333,6 +334,16 @@ export async function launchPiRuntime(root: string, address: string, args: strin
   const model = resolveModelCommand(config, selection.candidate);
   if (basename(model.agent) !== "pi") throw new Error(`Pi runtime launch requires a Pi candidate, received ${selection.candidate.id}.`);
   const command = dependencies.command ?? runOutput;
+  const piSession = adopting ? sessionIdFromPiJsonlPath(required(adoptedSessionPath, "an exact adopted Pi session path")) : resume ? record.runtime?.pi_session : (dependencies.sessionId ?? (() => crypto.randomUUID()))();
+  if (!piSession) throw new Error("Resume requires the exact Pi session stored on the seat.");
+  const canonicalAdoptedSessionPath = adopting ? resolve(required(adoptedSessionPath, "an exact adopted Pi session path")) : undefined;
+  const authorizationRecord = adopting
+    ? await resolveExactSessionAdoptionAuthorization(root, required(authorization, "an immutable operator authorization record"), {
+      seat: resolved, pi_session: piSession, pi_session_path: required(canonicalAdoptedSessionPath, "an exact adopted Pi session path"),
+      source: { herdr_session: required(sourceHerdrSession, "a source Herdr session"), pane: required(sourcePane, "a source pane") },
+      target: { herdr_session: herdrSession, pane: required(requestedPane, "--pane for exact-session adoption"), cwd: resolve(record.worktree) },
+    })
+    : undefined;
   const projection = await projectHerdrSeat(root, resolved, herdrSession, command);
   if (resume && projection.pane !== existingPane) throw new Error("Resume cannot relocate a Pi session across a Herdr session or pane; use explicit exact-session adoption.");
   if (requestedPane && requestedPane !== projection.pane) throw new Error("The asserted --pane does not match the seat-scoped Herdr projection.");
@@ -342,8 +353,6 @@ export async function launchPiRuntime(root: string, address: string, args: strin
   const currentProcess = processReport(JSON.parse(processRaw));
   if (currentPane.pane !== pane) throw new Error("Herdr reported a different pane; refusing runtime launch.");
   if (currentPane.agent || piProcess(currentProcess.processes)) throw new Error(resume ? "Resume requires the prior Pi to have exited and been released." : "New launch requires an available shell pane.");
-  const piSession = adopting ? sessionIdFromPiJsonlPath(required(adoptedSessionPath, "an exact adopted Pi session path")) : resume ? record.runtime?.pi_session : (dependencies.sessionId ?? (() => crypto.randomUUID()))();
-  if (!piSession) throw new Error("Resume requires the exact Pi session stored on the seat.");
   if (resume) {
     const prior = record.runtime?.launch_receipt;
     if (!prior) throw new Error("Resume requires an existing Flow launch receipt.");
@@ -352,7 +361,7 @@ export async function launchPiRuntime(root: string, address: string, args: strin
       if (receipt.seat !== resolved || receipt.pi_session !== piSession || receipt.pi_session_path !== record.runtime?.pi_session_path || receipt.herdr_session !== herdrSession || receipt.pane !== pane) throw new Error("receipt does not match seat/session/path/pane");
     } catch (error) { throw new Error(`Resume requires a valid Flow launch receipt: ${(error as Error).message}`); }
   }
-  const priorSessionPath = adopting ? required(adoptedSessionPath, "an exact adopted Pi session path") : resume ? required(record.runtime?.pi_session_path, "a previously verified Pi session path") : undefined;
+  const priorSessionPath = adopting ? required(canonicalAdoptedSessionPath, "an exact adopted Pi session path") : resume ? required(record.runtime?.pi_session_path, "a previously verified Pi session path") : undefined;
   if (adopting) {
     const [sourcePaneRaw, sourceProcessRaw] = await Promise.all([
       command(herdr(required(sourceHerdrSession, "a source Herdr session"), "pane", "get", required(sourcePane, "a source pane"))),
@@ -380,12 +389,12 @@ export async function launchPiRuntime(root: string, address: string, args: strin
   if ((resume || adopting) && sessionPath !== priorSessionPath) throw new Error("Herdr did not verify the exact requested Pi session path; seat binding was not changed.");
   if (agent.name !== agentName(resolved) || agent.pane !== pane || ![agent.status, verifiedPane.status].every((status) => status === "idle" || status === "done") || verifiedPane.pane !== pane || !verifiedProcess) throw new Error("Herdr did not verify the replacement Pi process; seat binding was not changed.");
   const receipt = plan.receipt;
-  const relocation = adopting ? await immutableSessionBackup(root, required(adoptedSessionPath, "an exact adopted Pi session path"), piSession) : undefined;
+  const relocation = adopting ? await immutableSessionBackup(root, required(canonicalAdoptedSessionPath, "an exact adopted Pi session path"), piSession) : undefined;
   const receiptRecord = {
     schema: "atdd-flow/pi-runtime-launch-receipt/v1", seat: resolved, tasks: active.map((entry) => entry.id), candidate: selection.candidate.id,
     selection: selection.fallback ? { result: "fallback", reason: selection.fallback } : { result: "selected", confidence: selection.selection.confidence, ...(selection.selection.available && selection.selection.model ? { model: selection.selection.model } : {}) },
     pi_session: piSession, pi_session_path: sessionPath, herdr_session: herdrSession, pane,
-    ...(relocation ? { relocation: { source_herdr_session: sourceHerdrSession, source_pane: sourcePane, authorization, backup: relocation.backup, backup_sha256: relocation.sha256 } } : {}),
+    ...(relocation ? { relocation: { source_herdr_session: sourceHerdrSession, source_pane: sourcePane, authorization: authorizationRecord, backup: relocation.backup, backup_sha256: relocation.sha256 } } : {}),
     created_at: dependencies.at?.() ?? now(),
   };
   await mkdir(dirname(receipt), { recursive: true });
