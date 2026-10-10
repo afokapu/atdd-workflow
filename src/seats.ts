@@ -394,7 +394,7 @@ export async function launchPiRuntime(root: string, address: string, args: strin
     schema: "atdd-flow/pi-runtime-launch-receipt/v1", seat: resolved, tasks: active.map((entry) => entry.id), candidate: selection.candidate.id,
     selection: selection.fallback ? { result: "fallback", reason: selection.fallback } : { result: "selected", confidence: selection.selection.confidence, ...(selection.selection.available && selection.selection.model ? { model: selection.selection.model } : {}) },
     pi_session: piSession, pi_session_path: sessionPath, herdr_session: herdrSession, pane,
-    ...(relocation ? { relocation: { source_herdr_session: sourceHerdrSession, source_pane: sourcePane, authorization: authorizationRecord, backup: relocation.backup, backup_sha256: relocation.sha256 } } : {}),
+    ...(relocation ? { relocation: { source_herdr_session: sourceHerdrSession, source_pane: sourcePane, authorization_message: authorizationRecord, backup: relocation.backup, backup_sha256: relocation.sha256 } } : {}),
     created_at: dependencies.at?.() ?? now(),
   };
   await mkdir(dirname(receipt), { recursive: true });
