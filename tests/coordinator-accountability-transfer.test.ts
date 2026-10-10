@@ -90,17 +90,34 @@ async function task(fixture: Fixture, id: string) {
   return Bun.YAML.parse(await readFile(join(fixture.site, "work", "demo", "tasks", `${id}.yaml`), "utf8")) as Record<string, unknown>;
 }
 
-async function ownerAuthorization(fixture: Fixture, recipient = "main@demo") {
+async function ownerAuthorization(fixture: Fixture, options: {
+  id: string;
+  recipient?: string;
+  authorization?: Record<string, unknown>;
+}) {
   const thread = "T-owner-authorized-topology-plan";
-  const authorization = `M-owner-authorized-${recipient.replace(/[^a-z0-9]/gi, "-")}`;
   await mkdir(join(fixture.site, "threads", thread), { recursive: true });
   await Bun.write(join(fixture.site, "threads", thread, "thread.yaml"), Bun.YAML.stringify({
     schema: "atdd-workflow/thread/v1", id: thread, participants: ["operator@desk", "main@demo", "coordinator.payments@demo"], subject: "Authorized topology plan", state: "open",
   }));
-  await Bun.write(join(fixture.site, "threads", thread, `${authorization}.yaml`), Bun.YAML.stringify({
-    schema: "atdd-workflow/message/v1", id: authorization, from: "operator@desk", to: [recipient], kind: "message", created_at: "2026-10-10T00:00:00.000Z", body: "Owner-authorized topology plan.",
+  await Bun.write(join(fixture.site, "threads", thread, `${options.id}.yaml`), Bun.YAML.stringify({
+    schema: "atdd-workflow/message/v1", id: options.id, from: "operator@desk", to: [options.recipient ?? "main@demo"], kind: "message", created_at: "2026-10-10T00:00:00.000Z", body: "Owner-authorized topology plan.",
+    ...(options.authorization ? { authorization: options.authorization } : {}),
   }));
-  return authorization;
+  return options.id;
+}
+
+function exactAuthorization(subject: Fixture, task: string, overrides: Record<string, unknown> = {}) {
+  return {
+    schema: "atdd-workflow/task-transfer-authorization/v1",
+    project: "demo",
+    task,
+    from: "main@demo",
+    to: "coordinator.payments@demo",
+    reason: "Bounded stream",
+    exact_head: { branch: "integration/payments", commit: subject.integrationHead },
+    ...overrides,
+  };
 }
 
 afterEach(async () => { await Promise.all(roots.splice(0).map((root) => rm(root, { recursive: true, force: true }))); });
@@ -158,11 +175,26 @@ test("RED: only the current coordinator or main with an operator authorization m
   expect(await fail(subject.site, "task", "transfer", "demo", "authorization", "--to", "coordinator.payments@demo", "--reason", "Bounded stream", "--by", "main@demo"))
     .toContain("owner-authorized topology plan");
 
-  const inapplicable = await ownerAuthorization(subject, "coordinator.payments@demo");
+  const inapplicable = await ownerAuthorization(subject, { id: "M-owner-inapplicable", recipient: "coordinator.payments@demo" });
   expect(await fail(subject.site, "task", "transfer", "demo", "authorization", "--to", "coordinator.payments@demo", "--reason", "Bounded stream", "--authorization", inapplicable, "--by", "main@demo"))
     .toContain(`not applicable to main@demo`);
 
-  const authorization = await ownerAuthorization(subject);
+  for (const [label, overrides] of [
+    ["historical", undefined],
+    ["wrong-task", { task: "other" }],
+    ["wrong-from", { from: "coordinator.payments@demo" }],
+    ["wrong-to", { to: "main@demo" }],
+    ["wrong-reason", { reason: "Different reason" }],
+    ["wrong-head", { exact_head: { branch: "integration/payments", commit: "0".repeat(40) } }],
+  ] as const) {
+    const id = `authorization-${label}`;
+    await addActiveTask(subject, id, "main@demo");
+    const reference = await ownerAuthorization(subject, { id: `M-owner-${label}`, authorization: overrides ? exactAuthorization(subject, id, overrides) : undefined });
+    expect(await fail(subject.site, "task", "transfer", "demo", id, "--to", "coordinator.payments@demo", "--reason", "Bounded stream", "--authorization", reference, "--by", "main@demo"))
+      .toContain("exact transfer authorization");
+  }
+
+  const authorization = await ownerAuthorization(subject, { id: "M-owner-exact", authorization: exactAuthorization(subject, "authorization") });
   expect(await run(subject.site, "task", "transfer", "demo", "authorization", "--to", "coordinator.payments@demo", "--reason", "Bounded stream", "--authorization", authorization, "--by", "main@demo"))
     .toBe("authorization  coordinator transferred  main@demo -> coordinator.payments@demo");
   expect(await task(subject, "authorization")).toMatchObject({
@@ -187,7 +219,7 @@ test("RED: transfer never moves worktrees and duplicate, nested, or mismatched t
   const nested = join(subject.site, "work", "demo", "seats", "coordinator.nested.stream", "seat.yaml");
   await mkdir(join(nested, ".."), { recursive: true });
   await Bun.write(nested, Bun.YAML.stringify({ schema: "atdd-workflow/seat/v2", address: "coordinator.nested.stream@demo", role: "coordinator", project: "demo", worktree: subject.integration, branch: "integration/nested/stream" }));
-  const authorization = await ownerAuthorization(subject);
+  const authorization = await ownerAuthorization(subject, { id: "M-owner-nested", authorization: exactAuthorization(subject, "fail-closed", { to: "coordinator.nested.stream@demo", reason: "Nested", exact_head: { branch: "integration/nested/stream", commit: subject.integrationHead } }) });
   expect(await fail(subject.site, "task", "transfer", "demo", "fail-closed", "--to", "coordinator.nested.stream@demo", "--reason", "Nested", "--authorization", authorization, "--by", "main@demo"))
     .toMatch(/nested|integration lineage/i);
 }, 20_000);
