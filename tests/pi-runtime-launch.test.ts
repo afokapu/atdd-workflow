@@ -153,6 +153,34 @@ test("resume refuses a prior Pi still present, a mismatched reported path, or a 
   await expect(launchPiRuntime(root, seat, ["--pane", "w1:p2", "--herdr-session", "forge", "--resume"], { select: selectEconomy, command: fakeHerdr({ verifiedPath: sessionPath.replace(sessionId, "01a99999-6789-7abc-8def-0123456789ab") }).command })).rejects.toThrow("exact requested Pi session");
 });
 
+test("RED: cross-session or pane relocation cannot use legacy resume", async () => {
+  const root = await desk();
+  await priorRuntime(root);
+  await expect(launchPiRuntime(root, seat, ["--pane", "w9:p9", "--herdr-session", "forge", "--resume"], {
+    select: selectEconomy, command: fakeHerdr().command,
+  })).rejects.toThrow("explicit exact-session adoption");
+  await expect(launchPiRuntime(root, seat, ["--herdr-session", "rehomed", "--resume"], {
+    select: selectEconomy, command: fakeHerdr().command,
+  })).rejects.toThrow("explicit exact-session adoption");
+});
+
+test("RED: explicit exact-session adoption needs a released source, backup hash, and immutable relocation receipt", async () => {
+  const root = await desk();
+  const source = join(root, "legacy-session_01a12345-6789-7abc-8def-0123456789ab.jsonl");
+  await writeFile(source, '{"type":"session"}\n');
+  const result = await launchPiRuntime(root, seat, [
+    "--herdr-session", "forge", "--adopt-session", source,
+    "--source-herdr-session", "legacy", "--source-pane", "w1:p2",
+    "--authorization", "thread:T-owner#M-authorized",
+  ], { select: selectEconomy, command: fakeHerdr({ verifiedPath: source }).command });
+  const receipt = await readYaml<Record<string, unknown>>(result.receipt);
+  expect(receipt).toMatchObject({ pi_session: sessionId, pi_session_path: source, relocation: {
+    source_herdr_session: "legacy", source_pane: "w1:p2", authorization: "thread:T-owner#M-authorized",
+  } });
+  expect(typeof (receipt.relocation as Record<string, unknown>).backup_sha256).toBe("string");
+  expect(await Bun.file((receipt.relocation as Record<string, string>).backup).exists()).toBe(true);
+});
+
 test("unavailable, low-confidence, or invalid Jev selection receipts the strongest fallback", async () => {
   const selections = [async () => ({ available: false as const, reason: "Jev offline" }), async () => ({ available: true as const, selected_model: "economy", confidence: 0.74 }), async () => ({ available: true as const, selected_model: "missing", confidence: 0.99 })];
   for (const select of selections) {
