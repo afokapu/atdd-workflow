@@ -13,6 +13,7 @@ import { seatTasks } from "./tasks";
 import { misplacedSeats, projectHerdrSeat } from "./multiplexer";
 import { isRuntimeStateStale, readRuntimeState } from "./runtime-state";
 import { resolveExactSessionAdoptionAuthorization } from "./adoption-authorizations";
+import { projectCollaborationPolicy } from "./collaboration-policy";
 
 const lifecycleConventionPath = "conventions/atdd-workflow.workflow/atdd-workflow.workflow.lifecycle.convention.yaml";
 
@@ -51,6 +52,7 @@ export async function init(root: string, name: string, args: string[]) {
   const config = { schema: "atdd-workflow/desk/v1" as const, desk: name, application: "herdr", executables: defaultExecutables() };
   await Promise.all([mkdir(paths(root).work, { recursive: true }), mkdir(paths(root).threads, { recursive: true })]);
   await Promise.all([atomicYaml(paths(root).desk, config), atomicYaml(paths(root).models, defaultModels())]);
+  await projectCollaborationPolicy(root);
   if (args.includes("--git") && !await exists(join(root, ".git"))) await run(["git", "init", "--initial-branch=main", root]);
   console.log(`Initialized Desk ${root}`);
 }
@@ -58,6 +60,7 @@ export async function init(root: string, name: string, args: string[]) {
 export async function migrate(root: string) {
   if (await migrateDesk(root)) console.log("Migrated legacy coordination registry to desk.yaml");
   else console.log("Desk registry already exists");
+  await projectCollaborationPolicy(root);
 }
 
 export async function initProject(root: string, name: string) {
