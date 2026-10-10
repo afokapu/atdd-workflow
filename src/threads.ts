@@ -18,8 +18,6 @@ export type Message = {
   expects_result?: boolean;
   created_at: string;
   body: string;
-  /** Typed, operator-issued authorization for one exact Pi-session adoption. */
-  exact_session_adoption_authorization?: unknown;
 };
 
 async function thread(root: string, threadId: string) {
@@ -231,7 +229,6 @@ async function post(root: string, threadId: string, args: string[], overrides: P
     ...(overrides.in_reply_to ? { in_reply_to: overrides.in_reply_to } : {}),
     ...(overrides.expects_result || has(args, "--expects-result") ? { expects_result: true } : {}),
     created_at: now(), body: required(overrides.body ?? words(args, "--body"), "--body"),
-    ...(overrides.exact_session_adoption_authorization ? { exact_session_adoption_authorization: overrides.exact_session_adoption_authorization } : {}),
   };
   const prepared = await Promise.all(recipients.filter((address) => address !== from).map((recipient) => prepareNativeMail(root, recipient, message, threadId)));
   // The durable queue is published before the authoritative message: a crash can leave only a harmless uncommitted reference, never durable mail without recovery.
@@ -239,7 +236,6 @@ async function post(root: string, threadId: string, args: string[], overrides: P
   await Promise.all(prepared.filter((entry): entry is NonNullable<typeof entry> => Boolean(entry)).map((entry) => publishNativeMail(root, entry.address, entry.segment, message.id)));
   await Promise.all(recipients.filter((address) => address !== from).map((recipient) => inject(root, recipient, message, threadId, prepared.some((entry) => entry?.address === recipient))));
   console.log(message.id);
-  return message.id;
 }
 
 export async function startThread(root: string, args: string[]) {
