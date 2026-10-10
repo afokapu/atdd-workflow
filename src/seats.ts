@@ -10,6 +10,7 @@ import {
 import { type ModelSelectionInput, type ModelSelectionResponse, selectModel } from "./judgment";
 import { seatTasks } from "./tasks";
 import { projectHerdrSeat } from "./multiplexer";
+import { isRuntimeStateStale, readRuntimeState } from "./runtime-state";
 
 const lifecycleConventionPath = "conventions/atdd-workflow.workflow/atdd-workflow.workflow.lifecycle.convention.yaml";
 
@@ -383,6 +384,17 @@ export async function openSeat(root: string, address: string) {
   // legacy scalar form while the durable record now carries its session too.
   const herdr = record.runtime?.addresses.herdr;
   if (herdr && typeof herdr !== "string") console.log(`herdr: ${herdr.pane} (session: ${herdr.session})`);
+  if (typeof herdr === "string") console.log(`herdr: ${herdr} (unscoped; unverified)`);
+  if (record.runtime?.application === "herdr") {
+    const advisory = await readRuntimeState(root, resolved);
+    const missing = [
+      typeof herdr === "string" || !herdr ? "Herdr session" : undefined,
+      !record.runtime.pi_session || !record.runtime.pi_session_path ? "Pi session/path" : undefined,
+      !record.runtime.launch_receipt || !await exists(record.runtime.launch_receipt) ? "launch receipt" : undefined,
+      !advisory || isRuntimeStateStale(advisory, 60_000) ? "advisory heartbeat" : undefined,
+    ].filter((entry): entry is string => Boolean(entry));
+    console.log(`runtime verification: ${missing.length ? `unverified (${missing.join(", ")})` : "bounded metadata and fresh advisory heartbeat"}`);
+  }
   const checkpointFile = paths(root).checkpointFile(resolved);
   if (await exists(checkpointFile)) console.log(yaml.print(await readYaml<Checkpoint>(checkpointFile)));
   const threadIds = await readdir(paths(root).threads);

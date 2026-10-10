@@ -85,6 +85,26 @@ test("RED: defaults make main primary and named coordinators bounded integration
   })).rejects.toThrow("must use one linked integration/<stream> worktree and branch");
 }, 20_000);
 
+test("RED: legacy unscoped Herdr records report unverified without inferring another session", async () => {
+  const root = await mkdtemp(join(tmpdir(), "atdd-unscoped-herdr-"));
+  roots.push(root);
+  const site = join(root, "desk");
+  await run(root, "init", site);
+  await run(site, "project", "init", "demo");
+  await run(site, "spawn", "demo", "driver", "legacy", "--worktree", join(root, "legacy"));
+  // A scalar legacy locator might name a pane that exists in some other Herdr
+  // session. It contains no session, Pi identity/path, receipt, or heartbeat,
+  // so reporting must not infer/attach/resume it.
+  await run(site, "bind", "driver.legacy@demo", "--application", "herdr", "--address", "w-other:p1");
+  const opened = await run(site, "open", "driver.legacy@demo");
+  expect(opened).toContain("herdr: w-other:p1 (unscoped; unverified)");
+  expect(opened).toContain("runtime verification: unverified");
+  expect(opened).toContain("Herdr session");
+  expect(opened).toContain("Pi session/path");
+  expect(opened).toContain("launch receipt");
+  expect(opened).toContain("advisory heartbeat");
+}, 20_000);
+
 test("RED: assigned drivers record the exact task-coordinator base and reject mismatch or nested streams", async () => {
   const root = await mkdtemp(join(tmpdir(), "atdd-integration-governed-base-"));
   roots.push(root);
