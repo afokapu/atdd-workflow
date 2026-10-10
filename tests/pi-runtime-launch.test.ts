@@ -92,6 +92,33 @@ function fakeHerdr(options: { released?: boolean; sourceLive?: boolean; verified
 }
 
 const selectEconomy = async () => ({ available: true as const, model: "fake-jev", selected_model: "economy", confidence: 0.93 });
+const coordinatorSeat = "coordinator.payments@demo";
+const coordinatorPrimary = "/work/coordinator-primary";
+const coordinatorWorktree = "/work/coordinator-worktrees/payments";
+
+async function coordinatorDesk() {
+  const root = await mkdtemp(join(tmpdir(), "atdd-coordinator-runtime-launch-"));
+  roots.push(root);
+  const bin = join(root, "bin");
+  const pi = join(bin, "pi");
+  await mkdir(bin);
+  await writeFile(pi, "#!/bin/sh\nexit 0\n");
+  await chmod(pi, 0o755);
+  await atomicYaml(paths(root).desk, { schema: "atdd-workflow/desk/v1", desk: "demo", application: "herdr", executables: { pi } });
+  await atomicYaml(paths(root).models, { schema: "atdd-workflow/models/v1", models: [{ id: "strong", executable: "pi", args: ["--model", "strong"] }, { id: "economy", executable: "pi", args: ["--model", "economy"] }] });
+  await atomicYaml(paths(root).projectFile("demo"), {
+    schema: "atdd-workflow/project/v1", project: "demo", repository: coordinatorPrimary, worktree_root: "/work/coordinator-worktrees",
+    roles: {
+      main: { address: "main@{project}", branch: "main", worktree: "{repository}" },
+      coordinator: { address: "coordinator.{name}@{project}", branch: "integration/{name}", worktree: "{worktree_root}/{name}" },
+      driver: { address: "driver.{name}@{project}", branch: "delivery/{name}", worktree: "{worktree_root}/{name}" },
+    },
+  });
+  await atomicYaml(paths(root).seatFile(coordinatorSeat), { schema: "atdd-workflow/seat/v2", address: coordinatorSeat, role: "coordinator", project: "demo", worktree: coordinatorWorktree, branch: "integration/payments" });
+  await atomicYaml(paths(root).taskFile("demo", "coordinate"), { schema: "atdd-workflow/task/v1", title: "Coordinate integration", status: "todo", coordinator: coordinatorSeat, done_when: [{ text: "Integration is accountable." }] });
+  return root;
+}
+
 afterEach(async () => { await Promise.all(roots.splice(0).map((root) => rm(root, { recursive: true, force: true }))); });
 
 test("first launch uses only installed Herdr commands and persists the exact reported JSONL path before binding", async () => {
@@ -310,6 +337,13 @@ test("launch eligibility admits assigned active or dependency-ready TODO without
   await refuse({ status: "done" });
   await refuse({ status: "todo", assignee: "driver.other@demo" });
   await refuse({ status: "invalid" });
+});
+
+test("RED: a correctly modeled named coordinator with coordinator-owned READY work launches", async () => {
+  const root = await coordinatorDesk();
+  await expect(launchPiRuntime(root, coordinatorSeat, ["--pane", "w1:p2", "--herdr-session", "forge", "--dry-run"], {
+    select: selectEconomy, command: fakeHerdr().command, sessionId: () => sessionId,
+  })).resolves.toMatchObject({ dryRun: true });
 });
 
 test("dry-run reads installed reports only and does not write, start, or bind", async () => {
