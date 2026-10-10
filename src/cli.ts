@@ -50,7 +50,7 @@ Usage:
   atdd-flow thread add <thread-id> <address>
   atdd-flow thread open <thread-id>
   atdd-flow message read <message-id>
-  atdd-flow post <thread-id> --from <address> --to <all|address,...> --body <text> [--label <non-sensitive-text>] [--expects-result]
+  atdd-flow post <thread-id> --from <address> --to <all|address,...> --body <text> [--label <non-sensitive-text>] [--expects-result] [--task-transfer-authorization <json>]
   atdd-flow receipt <thread-id> <message-id> --from <address> [--body <text>] [--label <non-sensitive-text>]
   atdd-flow result <thread-id> <message-id> --from <address> --body <text> [--label <non-sensitive-text>]
   atdd-flow status [project <project>|task <project> <task-id>|seat <address>|thread <thread-id>] [--all]

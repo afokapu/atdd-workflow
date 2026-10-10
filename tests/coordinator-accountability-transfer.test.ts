@@ -204,6 +204,20 @@ test("RED: only the current coordinator or main with an operator authorization m
   });
 }, 20_000);
 
+test("GREEN: only operator creates a typed immutable transfer authorization", async () => {
+  const subject = await fixture();
+  const authorization = exactAuthorization(subject, "transfer");
+  const thread = "T-owner-authorized-topology-plan";
+  await mkdir(join(subject.site, "threads", thread), { recursive: true });
+  await Bun.write(join(subject.site, "threads", thread, "thread.yaml"), Bun.YAML.stringify({
+    schema: "atdd-workflow/thread/v1", id: thread, participants: ["operator@desk", "main@demo", "coordinator.payments@demo"], subject: "Authorized topology plan", state: "open",
+  }));
+  const message = await run(subject.site, "post", thread, "--from", "operator@desk", "--to", "main@demo", "--label", "exact-transfer-authorization", "--body", "Exact owner authorization.", "--task-transfer-authorization", JSON.stringify(authorization));
+  expect(await run(subject.site, "message", "read", message)).toContain("task-transfer-authorization/v1");
+  expect(await fail(subject.site, "post", thread, "--from", "coordinator.payments@demo", "--to", "main@demo", "--body", "Not owner.", "--task-transfer-authorization", JSON.stringify(authorization)))
+    .toContain("Only operator@desk");
+}, 20_000);
+
 test("RED: transfer never moves worktrees and duplicate, nested, or mismatched targets fail closed", async () => {
   const subject = await fixture();
   await addActiveTask(subject, "fail-closed");

@@ -214,8 +214,18 @@ export async function assign(root: string, projectName: string, id: string, args
   console.log(`${id}  assigned  ${assignee}`);
 }
 
-async function operatorAuthorization(root: string, reference: string, main: string) {
-  type AuthorizationMessage = { schema?: string; id?: string; from?: string; to?: "all" | string[] };
+type TransferAuthorization = {
+  schema: "atdd-workflow/task-transfer-authorization/v1";
+  project: string;
+  task: string;
+  from: string;
+  to: string;
+  reason: string;
+  exact_head: { branch: string; commit: string };
+};
+
+async function operatorAuthorization(root: string, reference: string, main: string, expected: TransferAuthorization) {
+  type AuthorizationMessage = { schema?: string; id?: string; from?: string; to?: "all" | string[]; authorization?: TransferAuthorization };
   type AuthorizationThread = { schema?: string; participants?: string[] };
   const folders = await readdir(paths(root).threads, { withFileTypes: true });
   const matches = (await Promise.all(folders.filter((entry) => entry.isDirectory() && entry.name.startsWith("T-"))
@@ -236,6 +246,15 @@ async function operatorAuthorization(root: string, reference: string, main: stri
   if (matches[0].message.to !== "all" && !matches[0].message.to?.includes(main)) {
     throw new Error(`Authorization ${reference} is not applicable to ${main}.`);
   }
+  const authorization = matches[0].message.authorization;
+  if (!authorization || authorization.schema !== expected.schema
+    || authorization.project !== expected.project || authorization.task !== expected.task
+    || authorization.from !== expected.from || authorization.to !== expected.to
+    || authorization.reason !== expected.reason
+    || authorization.exact_head?.branch !== expected.exact_head.branch
+    || authorization.exact_head.commit !== expected.exact_head.commit) {
+    throw new Error(`Authorization ${reference} is not an exact transfer authorization.`);
+  }
 }
 
 /**
@@ -250,18 +269,27 @@ export async function transfer(root: string, projectName: string, id: string, ar
   const target = await canonicalAddress(root, required(words(args, "--to"), "--to"));
   const main = `main@${config.project}`;
   if (target === task.coordinator) throw new Error(`Task ${id} is already accountable to ${target}.`);
-  if (actor === main) await operatorAuthorization(root, required(words(args, "--authorization"), "an owner-authorized topology plan"), main);
-  else if (actor !== task.coordinator) throw new Error(`Only ${main} or the current coordinator may transfer task ${id}.`);
+  if (actor !== main && actor !== task.coordinator) throw new Error(`Only ${main} or the current coordinator may transfer task ${id}.`);
 
   // governedBase confirms main/named-coordinator identity, exact branch head,
   // and the driver's descendant relationship before accountability changes.
   const base = await governedBase(root, projectName, target, task.assignee);
   if (!base) throw new Error(`Task ${id} needs an assigned driver and governed repository before transfer.`);
+  const authorization = actor === main ? required(words(args, "--authorization"), "an owner-authorized topology plan") : undefined;
+  if (authorization) await operatorAuthorization(root, authorization, main, {
+    schema: "atdd-workflow/task-transfer-authorization/v1",
+    project: config.project,
+    task: id,
+    from: task.coordinator,
+    to: target,
+    reason: required(words(args, "--reason"), "--reason"),
+    exact_head: { branch: base.branch, commit: base.commit },
+  });
   const transfer: CoordinatorTransfer = {
     from: task.coordinator,
     to: target,
     reason: required(words(args, "--reason"), "--reason"),
-    ...(actor === main ? { authorization: required(words(args, "--authorization"), "an owner-authorized topology plan") } : {}),
+    ...(authorization ? { authorization } : {}),
     exact_head: { branch: base.branch, commit: base.commit },
     effective_at: now(),
   };
