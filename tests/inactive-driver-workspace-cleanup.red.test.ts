@@ -325,3 +325,41 @@ test("guard: seat retire fails closed on an unmerged delivery branch", async () 
   await retireFailsClosed(fixture, "unmerged", ["seat", "retire", "driver.unmerged@demo", "--by", fixture.coordinator], "is not merged");
   expect(await git(fixture.repository, "branch", "--list", "delivery/unmerged")).toContain("delivery/unmerged");
 });
+
+test("RED: seat retire records retirement for an all-DONE driver whose worktree is absent and unregistered, keeping its branch", async () => {
+  const fixture = await desk(["vanished"]);
+  const worktree = join(fixture.worktrees, "vanished");
+  await finishTask(fixture.site, fixture.clean, "driver.vanished@demo", "W-vanished");
+  await git(fixture.repository, "worktree", "remove", "--force", worktree);
+  const herdr = await fakeHerdr(fixture.root, [
+    { id: "wPrimary", label: "demo", path: fixture.repository },
+    { id: "wVanished", label: "driver.vanished@demo", path: worktree },
+  ]);
+  const environment = { ...herdr.environment, HERDR_SESSION: "chosen" };
+  await run(fixture.site, environment, "seat", "retire", "driver.vanished@demo", "--by", fixture.coordinator);
+  const record = await run(fixture.site, environment, "open", "driver.vanished@demo");
+  expect(record).toContain("retired:");
+  expect(record).toContain("status: complete");
+  expect(record).toContain("absent");
+  // No worktree finish ran: the branch is kept as evidence and the worktree is not recreated.
+  expect(await git(fixture.repository, "branch", "--list", "delivery/vanished")).toContain("delivery/vanished");
+  await expect(stat(worktree)).rejects.toThrow();
+  const calls = await herdr.calls();
+  expect(calls).toContain("--session chosen workspace close wVanished");
+  expect(calls).not.toContain("workspace close wPrimary");
+});
+
+test("guard: seat retire fails closed when the absent worktree is still registered with Git", async () => {
+  const fixture = await desk(["registered"]);
+  const worktree = join(fixture.worktrees, "registered");
+  await finishTask(fixture.site, fixture.clean, "driver.registered@demo", "W-registered");
+  await rm(worktree, { recursive: true, force: true });
+  expect(await git(fixture.repository, "worktree", "list", "--porcelain")).toContain(worktree);
+  const herdr = await fakeHerdr(fixture.root, [{ id: "wPrimary", label: "demo", path: fixture.repository }]);
+  const environment = { ...herdr.environment, HERDR_SESSION: "chosen" };
+  const result = await spawnCli(fixture.site, environment, ["seat", "retire", "driver.registered@demo", "--by", fixture.coordinator]);
+  expect(result.code).not.toBe(0);
+  expect(await run(fixture.site, environment, "open", "driver.registered@demo")).not.toContain("retired:");
+  expect(await git(fixture.repository, "branch", "--list", "delivery/registered")).toContain("delivery/registered");
+  expect(await herdr.calls()).not.toContain("workspace close");
+});
