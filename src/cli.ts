@@ -5,13 +5,16 @@ import { init, initProject, configureProject, spawn, bind, useApplication, attac
 import { createExactSessionAdoptionAuthorization } from "./adoption-authorizations";
 import { addParticipant, openThread, post, readMessage, receipt, result, startThread } from "./threads";
 import * as tasks from "./tasks";
-import { required, values, words, yaml } from "./core";
+import { has, paths, readYaml, required, values, words, yaml } from "./core";
 import { addressBook } from "./address-book";
 import * as judgment from "./judgment";
 import * as reviews from "./reviews";
 import { status } from "./overview";
 import { multiplexer } from "./multiplexer";
 import * as cleanup from "./ephemeral-resources";
+import { authorizeLiveProjection, linearGraphql, mirrorMessage, mirrorTask, readMirrorConfig } from "./linear-mirror";
+import type { Task } from "./tasks";
+import type { Message } from "./threads";
 import * as ownerAlerts from "./owner-escalations";
 import { recordHandover, showHandover } from "./handover";
 
@@ -53,6 +56,9 @@ Usage:
   atdd-flow task open <project> <task-id>
   atdd-flow cleanup status <project>
   atdd-flow cleanup checklist <project> <task-id>
+  atdd-flow linear mirror authorize --config <file> --id <LMA-id> --by operator@desk
+  atdd-flow linear mirror task <project> <task-id> --config <file> [--apply --authorization <LMA-id>]
+  atdd-flow linear mirror message <project> <task-id> <thread-id> <message-id> --config <file> [--apply --authorization <LMA-id>]
   atdd-flow owner-alert scan --by <coordinator-or-main> [--re-notify-after-ms <milliseconds>]
   atdd-flow owner-alert deliver|acknowledge|execute|resolve <alert-id> --by <address> [--note <text>|--option <id>|--reason <text>]
   atdd-flow thread start --with <address,...> --subject <text> [--task <project/task-id>]
@@ -141,6 +147,30 @@ async function main() {
       if (subcommand === "status") return console.log(Bun.YAML.stringify(await cleanup.coordinatorStatus(root, required(projectName, "project"))));
       if (subcommand === "checklist") return console.log(await cleanup.checklist(root, { project: required(projectName, "project"), task: required(taskId, "task id") }));
       throw new Error("Use `atdd-flow cleanup status <project>` or `atdd-flow cleanup checklist <project> <task-id>`.");
+    },
+    linear: async () => {
+      if (rest[0] !== "mirror") throw new Error("Use `atdd-flow linear mirror authorize|task|message ...`.");
+      if (rest[1] === "authorize") {
+        const config = await readMirrorConfig(required(words(rest.slice(2), "--config"), "--config"));
+        return console.log(await authorizeLiveProjection(root, config, { id: required(words(rest.slice(2), "--id"), "--id"), by: required(words(rest.slice(2), "--by"), "--by") }));
+      }
+      if (!["task", "message"].includes(rest[1] ?? "")) throw new Error("Use `atdd-flow linear mirror authorize|task|message ...`.");
+      const kind = rest[1]!;
+      const projectName = required(rest[2], "project");
+      const taskName = required(rest[3], "task id");
+      const tail = rest.slice(kind === "task" ? 4 : 6);
+      const config = await readMirrorConfig(required(words(tail, "--config"), "--config"));
+      const apply = has(tail, "--apply");
+      const authorization = words(tail, "--authorization");
+      if (apply && !authorization) throw new Error("Live Linear writes require an immutable operator@desk authorization id.");
+      const linear = linearGraphql(apply ? required(process.env.LINEAR_API_KEY, "LINEAR_API_KEY") : "dry-run");
+      const task = await readYaml<Task>(paths(root).taskFile(projectName, taskName));
+      const source = { canonical_id: `flow:task:${projectName}/${taskName}`, project: projectName, task_id: taskName, title: task.title, status: task.status, ...(task.body ? { body: task.body } : {}) };
+      if (kind === "task") return console.log(yaml.print(await mirrorTask(root, config, source, linear, { apply, ...(authorization ? { authorization } : {}) })));
+      const threadId = required(rest[4], "thread id");
+      const messageId = required(rest[5], "message id");
+      const message = await readYaml<Message>(paths(root).message(threadId, messageId));
+      return console.log(yaml.print(await mirrorMessage(root, config, { canonical_id: `flow:message:${threadId}/${messageId}`, task_canonical_id: source.canonical_id, project: projectName, task_id: taskName, thread_id: threadId, message_id: messageId, body: message.body }, linear, { apply, ...(authorization ? { authorization } : {}) })));
     },
     "owner-alert": async () => {
       const [subcommand, alertId, ...tail] = rest;
