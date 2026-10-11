@@ -1,6 +1,7 @@
 import { mkdir, readdir, rm, stat } from "node:fs/promises";
 import { join } from "node:path";
 import { notify } from "./adapters";
+import { seatTasks } from "./tasks";
 import {
   atomicYaml, canonicalAddress, desk, has, id, now, paths, project, readYaml,
   required, runtimeAddress, seat, words,
@@ -82,6 +83,13 @@ async function assertRoute(root: string, from: string, recipients: string[]) {
     throw new Error(`${from} may not directly address operator@desk; route through the responsible coordinator and main seat.`);
   }
   if (sender.role === "driver" && targets.some((target) => target.role !== "coordinator")) {
+    // A driver may also reach the actual coordinator of its own non-done task in the same project (e.g. main).
+    const owners = new Set((await seatTasks(root, sender.project, from))
+      .filter(({ task }) => task.assignee === from && task.status !== "done")
+      .map(({ task }) => task.coordinator));
+    const permitted = (target: { address: string; role: string; project: string }) =>
+      target.role === "coordinator" || (target.project === sender.project && owners.has(target.address));
+    if (targets.every(permitted)) return;
     throw new Error(`${from} may message only a coordinator; coordinators and main seats handle further escalation.`);
   }
 }
