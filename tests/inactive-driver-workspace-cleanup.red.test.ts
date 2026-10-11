@@ -88,6 +88,9 @@ async function desk(drivers: string[]) {
   await writeFile(join(repository, "atdd-bun.yaml"), "worktrees:\n  enabled: true\n  root: ../worktrees\n  primary_directory: repository\n  primary_branch: main\n  require_linked_worktree: true\n");
   await git(repository, "add", ".gitignore", "atdd-bun.yaml");
   await git(repository, "commit", "-m", "configure worktrees");
+  // Retirement resolves ATDD Bun from the primary checkout, never the seat worktree.
+  await mkdir(join(repository, "node_modules", ".bin"), { recursive: true });
+  await symlink(join(import.meta.dir, "..", "node_modules", ".bin", "atdd-bun"), join(repository, "node_modules", ".bin", "atdd-bun"));
   await run(root, clean, "init", site);
   await run(site, clean, "project", "init", "demo");
   await writeFile(join(site, "work", "demo", "project.yaml"), `schema: atdd-workflow/project/v1
