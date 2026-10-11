@@ -13,6 +13,7 @@ import { status } from "./overview";
 import { multiplexer } from "./multiplexer";
 import * as cleanup from "./ephemeral-resources";
 import * as ownerAlerts from "./owner-escalations";
+import { recordHandover, showHandover } from "./handover";
 
 const usage = `atdd-flow — filesystem-first agent seats and tasks
 
@@ -34,6 +35,8 @@ Usage:
   atdd-flow multiplexer status|apply herdr [--session <name>]
   atdd-flow describe <address> --purpose <one-line responsibility>
   atdd-flow checkpoint <address> --summary <text> --next <text> [--status active|standby|blocked|complete|unverified]
+  atdd-flow handover <address> --file <path> [--check]
+  atdd-flow handover show <address>
   atdd-flow task add <project> <task-id> --title <text> --coordinator <address> [--assignee <address>] [--body <text>] [--source <reference>] [--depends-on <task-id,...>] --done-when <text> [--done-when <text> ...]
   atdd-flow task assign <project> <task-id> --assignee <address> --by <coordinator-address>
   atdd-flow task transfer <project> <task-id> --to <main-or-named-coordinator> --reason <text> --by <actor> [--authorization <operator-message-id>]
@@ -112,6 +115,7 @@ async function main() {
     multiplexer: () => multiplexer(root, rest),
     describe: () => describe(root, required(rest[0], "address"), rest.slice(1)),
     checkpoint: () => checkpoint(root, required(rest[0], "address"), rest.slice(1)),
+    handover: () => rest[0] === "show" ? showHandover(root, required(rest[1], "address")) : recordHandover(root, required(rest[0], "address"), rest.slice(1)),
     task: async () => {
       const [subcommand, projectName, taskId, ...tail] = rest;
       if (subcommand === "add") return tasks.add(root, required(projectName, "project"), required(taskId, "task id"), tail);

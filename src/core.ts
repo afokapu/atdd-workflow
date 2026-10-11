@@ -159,6 +159,7 @@ export const paths = (root: string) => ({
   },
   seatFile: (address: string) => join(paths(root).seat(address), "seat.yaml"),
   checkpointFile: (address: string) => join(paths(root).seat(address), "checkpoint.yaml"),
+  handoverFile: (address: string) => join(paths(root).seat(address), "handover.yaml"),
   tasks: (project: string) => join(root, "work", project, "tasks"),
   taskFile: (project: string, task: string) => join(root, "work", project, "tasks", `${taskId(task)}.yaml`),
   behavioralReviewFile: (project: string, task: string) => join(root, "work", project, "tasks", `${taskId(task)}.reviews.yaml`),
