@@ -359,6 +359,7 @@ test("guard: seat retire fails closed when the absent worktree is still register
   const environment = { ...herdr.environment, HERDR_SESSION: "chosen" };
   const result = await spawnCli(fixture.site, environment, ["seat", "retire", "driver.registered@demo", "--by", fixture.coordinator]);
   expect(result.code).not.toBe(0);
+  expect(result.stderr).toContain("still registered with Git");
   expect(await run(fixture.site, environment, "open", "driver.registered@demo")).not.toContain("retired:");
   expect(await git(fixture.repository, "branch", "--list", "delivery/registered")).toContain("delivery/registered");
   expect(await herdr.calls()).not.toContain("workspace close");
