@@ -3,6 +3,7 @@ import { chmod, mkdir, mkdtemp, readFile, rm, stat, symlink, writeFile } from "n
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { parse, stringify } from "yaml";
+import { projectHerdrSeat } from "../src/multiplexer";
 
 /**
  * RED contract for closing inactive driver workspaces. Every fixture lives
@@ -36,8 +37,12 @@ async function git(cwd: string, ...args: string[]) {
 
 type Workspace = { id: string; label: string; path: string; agent?: "idle" | "working" | "blocked" };
 
-/** A fake Herdr that reports fixed workspaces/panes and logs every invocation. */
-async function fakeHerdr(root: string, workspaces: Workspace[]) {
+/**
+ * A fake Herdr that reports fixed workspaces/panes and logs every invocation.
+ * `pane get` answers only for listed live Pi panes; `worktree open` fails for a
+ * missing checkout, as real Herdr does.
+ */
+async function fakeHerdr(root: string, workspaces: Workspace[], livePanes: string[] = []) {
   const bin = join(root, "bin");
   const log = join(root, "herdr.log");
   await mkdir(bin, { recursive: true });
@@ -45,6 +50,13 @@ async function fakeHerdr(root: string, workspaces: Workspace[]) {
   const paneCases = workspaces.map((entry) => `  pane:list:${entry.id}) printf '%s' '${JSON.stringify({ result: { panes: [{ pane_id: `${entry.id}:p1`, tab_id: `${entry.id}:t1`, workspace_id: entry.id, label: entry.label, agent: "pi", agent_status: entry.agent ?? "idle" }] } })}' ;;`).join("\n");
   await writeFile(join(bin, "herdr"), `#!/bin/sh
 printf '%s\\n' "$*" >> '${log}'
+if [ "$3:$4" = "pane:get" ]; then
+  case "$5" in
+${livePanes.map((pane) => `    ${pane}) printf '%s' '${JSON.stringify({ result: { pane: { pane_id: pane, agent: "pi", agent_status: "idle" } } })}' ; exit 0 ;;`).join("\n")}
+    *) printf '%s' 'pane not found' >&2 ; exit 1 ;;
+  esac
+fi
+if [ "$3:$4" = "worktree:open" ] && [ ! -d "$8" ]; then printf '%s' 'worktree path does not exist' >&2 ; exit 1 ; fi
 case "$3:$4:$6" in
   workspace:list:*) printf '%s' '${listed}' ;;
 ${paneCases}
@@ -120,6 +132,7 @@ async function mixedSession() {
   await finishTask(fixture.site, fixture.clean, "driver.done@demo", "W-done");
   await finishTask(fixture.site, fixture.clean, "driver.busy@demo", "W-busy");
   await run(fixture.site, fixture.clean, "task", "add", "demo", "W-active", "--title", "Active", "--coordinator", fixture.coordinator, "--assignee", "driver.active@demo", "--done-when", "Delivered.");
+  await run(fixture.site, fixture.clean, "task", "start", "demo", "W-active", "--by", "driver.active@demo");
   const herdr = await fakeHerdr(fixture.root, [
     { id: "wPrimary", label: "demo", path: fixture.repository },
     { id: "wDone", label: "driver.done@demo", path: join(fixture.worktrees, "done") },
@@ -146,6 +159,66 @@ test("RED: multiplexer apply closes only idle inactive driver workspaces when cl
   // A working or blocked Pi agent is reported, never closed.
   expect(output).toContain("driver.busy@demo");
   for (const kept of ["wBusy", "wActive", "wPrimary", "wOperator", "wScratch"]) expect(calls).not.toContain(`workspace close ${kept}`);
+});
+
+async function assign(fixture: Awaited<ReturnType<typeof desk>>, driver: string, id: string, ...states: Array<"start" | "block">) {
+  await run(fixture.site, fixture.clean, "task", "add", "demo", id, "--title", id, "--coordinator", fixture.coordinator, "--assignee", driver, "--done-when", "Delivered.");
+  if (states.includes("start")) await run(fixture.site, fixture.clean, "task", "start", "demo", id, "--by", driver);
+  if (states.includes("block")) await run(fixture.site, fixture.clean, "task", "block", "demo", id, "--by", fixture.coordinator, "--reason", "waiting on a decision");
+}
+
+test("RED: apply projects only drivers with unblocked in-progress work or a live Pi runtime", async () => {
+  const fixture = await desk(["working", "queued", "blocked", "livebound", "deadbound"]);
+  await assign(fixture, "driver.working@demo", "W-working", "start");
+  await assign(fixture, "driver.queued@demo", "W-queued");
+  await assign(fixture, "driver.blocked@demo", "W-blocked", "start", "block");
+  await assign(fixture, "driver.livebound@demo", "W-livebound");
+  await assign(fixture, "driver.deadbound@demo", "W-deadbound");
+  await run(fixture.site, fixture.clean, "bind", "driver.livebound@demo", "--application", "herdr", "--address", "wElsewhere:p1", "--session", "chosen");
+  await run(fixture.site, fixture.clean, "bind", "driver.deadbound@demo", "--application", "herdr", "--address", "wGone:p9", "--session", "chosen");
+  const herdr = await fakeHerdr(fixture.root, [
+    { id: "wPrimary", label: "demo", path: fixture.repository },
+    { id: "wBlocked", label: "driver.blocked@demo", path: join(fixture.worktrees, "blocked") },
+  ], ["wElsewhere:p1"]);
+  await run(fixture.site, herdr.environment, "multiplexer", "apply", "herdr", "--session", "chosen");
+  const calls = await herdr.calls();
+  const opened = (name: string) => calls.includes(`worktree open --workspace wPrimary --path ${join(fixture.worktrees, name)} `);
+  expect(opened("working")).toBe(true);
+  expect(opened("livebound")).toBe(true);
+  // Never-started, blocked, and stale-bound drivers are not recreated as empty shells.
+  expect(opened("queued")).toBe(false);
+  expect(opened("blocked")).toBe(false);
+  expect(opened("deadbound")).toBe(false);
+  expect(calls).toContain("--session chosen workspace close wBlocked");
+  expect(calls).not.toContain("workspace close wPrimary");
+  const status = JSON.parse(await run(fixture.site, herdr.environment, "multiplexer", "status", "herdr", "--session", "chosen"));
+  expect(status).toMatchObject({ stale: 1 });
+});
+
+test("RED: apply skips and reports a missing driver worktree instead of aborting the Desk", async () => {
+  const fixture = await desk(["gone", "working"]);
+  await assign(fixture, "driver.gone@demo", "W-gone", "start");
+  await assign(fixture, "driver.working@demo", "W-working", "start");
+  await rm(join(fixture.worktrees, "gone"), { recursive: true, force: true });
+  const herdr = await fakeHerdr(fixture.root, [{ id: "wPrimary", label: "demo", path: fixture.repository }]);
+  const result = await spawnCli(fixture.site, herdr.environment, ["multiplexer", "apply", "herdr", "--session", "chosen"]);
+  expect(result.code, result.stderr).toBe(0);
+  expect(`${result.stdout}\n${result.stderr}`).toContain("driver.gone@demo");
+  expect(await herdr.calls()).toContain(`worktree open --workspace wPrimary --path ${join(fixture.worktrees, "working")} `);
+});
+
+test("guard: explicit per-seat projection still opens a driver that blanket apply treats as inactive", async () => {
+  const fixture = await desk(["queued"]);
+  await assign(fixture, "driver.queued@demo", "W-queued");
+  const herdr = await fakeHerdr(fixture.root, [{ id: "wPrimary", label: "demo", path: fixture.repository }]);
+  const projection = await projectHerdrSeat(fixture.site, "driver.queued@demo", "chosen", async (args) => {
+    const child = Bun.spawn(args, { env: herdr.environment, stdout: "pipe", stderr: "pipe" });
+    const [stdout, code] = await Promise.all([new Response(child.stdout).text(), child.exited]);
+    if (code !== 0) throw new Error(`herdr failed: ${args.join(" ")}`);
+    return stdout.trim();
+  });
+  expect(projection.label).toBe("driver.queued@demo");
+  expect(await herdr.calls()).toContain(`worktree open --workspace wPrimary --path ${join(fixture.worktrees, "queued")} `);
 });
 
 test("RED: task done --retire-assignee closes the retired driver workspace", async () => {
