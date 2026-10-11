@@ -6,7 +6,7 @@ import { join } from "node:path";
 const cli = join(import.meta.dir, "..", "src", "cli.ts");
 
 async function exec(cwd: string, command: string[], expected = 0) {
-  const child = Bun.spawn(command, { cwd, stdout: "pipe", stderr: "pipe" });
+  const child = Bun.spawn(command, { cwd, env: { ...process.env, ATDD_WORKFLOW_ROOT: undefined, ATDD_WORKFLOW_SEAT: undefined }, stdout: "pipe", stderr: "pipe" });
   const [stdout, stderr, code] = await Promise.all([new Response(child.stdout).text(), new Response(child.stderr).text(), child.exited]);
   expect(code, stderr).toBe(expected);
   return stdout.trim();
