@@ -90,6 +90,18 @@ type PendingReference = { thread: string; message: string; created_at: string; p
 type PendingSegment = { schema: "atdd-flow/pi-inbox-segment/v1"; entries: PendingReference[]; next?: string };
 type PendingQueue = { schema: "atdd-flow/pi-inbox-queue/v1"; head?: string; tail?: string };
 
+function isPendingQueue(value: unknown): value is Required<PendingQueue> {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return false;
+  const queue = value as PendingQueue;
+  return queue.schema === "atdd-flow/pi-inbox-queue/v1"
+    && typeof queue.head === "string" && queue.head.length > 0
+    && typeof queue.tail === "string" && queue.tail.length > 0;
+}
+
+function missingFile(error: unknown) {
+  return (error as NodeJS.ErrnoException).code === "ENOENT";
+}
+
 function inboxDirectory(root: string, address: string) {
   return join(root, ".atdd-flow", "pi-inbox", encodeURIComponent(address));
 }
@@ -129,8 +141,16 @@ export async function enqueueNativeMail(root: string, address: string, reference
   return withInboxLock(directory, async () => {
     const statePath = join(directory, "queue.yaml");
     let queue: PendingQueue;
-    try { queue = await readYaml<PendingQueue>(statePath); }
-    catch { queue = { schema: "atdd-flow/pi-inbox-queue/v1" }; }
+    try {
+      queue = await readYaml<PendingQueue>(statePath);
+      if (!isPendingQueue(queue)) throw new Error(`Malformed pending inbox queue ${statePath}`);
+    } catch (error) {
+      // A reconciler deletes the index once it drains the final segment. Only
+      // that absent-index state may be initialized by normal enqueue; parse,
+      // permission, and competing-state failures remain fail-closed.
+      if (!missingFile(error)) throw error;
+      queue = { schema: "atdd-flow/pi-inbox-queue/v1" };
+    }
     const entriesPath = (segment: string) => join(directory, "pending", `${segment}.yaml`);
     const compare = (left: PendingReference, right: PendingReference) => left.created_at.localeCompare(right.created_at) || left.message.localeCompare(right.message);
     const capacity = 32;
@@ -176,10 +196,20 @@ export async function enqueueNativeMail(root: string, address: string, reference
   });
 }
 
-async function publishNativeMail(root: string, address: string, _segment: string, message: string) {
+export async function publishNativeMail(root: string, address: string, _segment: string, message: string) {
   const directory = inboxDirectory(root, address);
   await withInboxLock(directory, async () => {
-    const queue = await readYaml<PendingQueue>(join(directory, "queue.yaml"));
+    const statePath = join(directory, "queue.yaml");
+    let queue: PendingQueue;
+    try { queue = await readYaml<PendingQueue>(statePath); }
+    catch (error) {
+      // A native reconciler may consume the newly authoritative message and
+      // drain the queue between prepare and this advisory publish marker.
+      // Its deletion is a successful exactly-once delivery, not an error.
+      if (missingFile(error)) return;
+      throw error;
+    }
+    if (!isPendingQueue(queue)) throw new Error(`Malformed pending inbox queue ${statePath}`);
     let segment = queue.head;
     while (segment) {
       const path = join(directory, "pending", `${segment}.yaml`);
