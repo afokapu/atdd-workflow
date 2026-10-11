@@ -22,19 +22,21 @@ const originalEnvironment = {
   pane: process.env.ATDD_FLOW_HERDR_PANE,
 };
 
-process.env.ATDD_WORKFLOW_ROOT = root;
-process.env.ATDD_WORKFLOW_SEAT = seat;
-process.env.ATDD_FLOW_PI_SESSION = session;
-process.env.ATDD_FLOW_HERDR_SESSION = "forge";
-process.env.ATDD_FLOW_HERDR_PANE = "w1:p2";
+function useEnvironment() {
+  process.env.ATDD_WORKFLOW_ROOT = root;
+  process.env.ATDD_WORKFLOW_SEAT = seat;
+  process.env.ATDD_FLOW_PI_SESSION = session;
+  process.env.ATDD_FLOW_HERDR_SESSION = "forge";
+  process.env.ATDD_FLOW_HERDR_PANE = "w1:p2";
+}
 
 afterEach(async () => {
   await rm(root, { recursive: true, force: true });
-  process.env.ATDD_WORKFLOW_ROOT = originalEnvironment.root;
-  process.env.ATDD_WORKFLOW_SEAT = originalEnvironment.seat;
-  process.env.ATDD_FLOW_PI_SESSION = originalEnvironment.piSession;
-  process.env.ATDD_FLOW_HERDR_SESSION = originalEnvironment.herdrSession;
-  process.env.ATDD_FLOW_HERDR_PANE = originalEnvironment.pane;
+  for (const [name, value] of [
+    ["ATDD_WORKFLOW_ROOT", originalEnvironment.root], ["ATDD_WORKFLOW_SEAT", originalEnvironment.seat],
+    ["ATDD_FLOW_PI_SESSION", originalEnvironment.piSession], ["ATDD_FLOW_HERDR_SESSION", originalEnvironment.herdrSession],
+    ["ATDD_FLOW_HERDR_PANE", originalEnvironment.pane],
+  ] as const) { if (value === undefined) delete process.env[name]; else process.env[name] = value; }
 });
 
 async function taskFixture(lifecycle: Lifecycle) {
@@ -71,6 +73,7 @@ async function queueStaleMail() {
 }
 
 async function startPi(lifecycle: Lifecycle, staleMail = false) {
+  useEnvironment();
   await taskFixture(lifecycle);
   if (staleMail) await queueStaleMail();
   const sent: Sent[] = [];
@@ -84,7 +87,7 @@ async function startPi(lifecycle: Lifecycle, staleMail = false) {
     sendMessage(message: Sent) { sent.push(message); },
   } as never);
   await start?.({}, { hasUI: false });
-  for (let attempt = 0; attempt < 40 && !sent.some((message) => message.customType === "atdd-flow-next-action"); attempt += 1) {
+  for (let attempt = 0; attempt < 100 && sent.filter((message) => message.customType === "atdd-flow-next-action").length < 2; attempt += 1) {
     await new Promise((resolve) => setTimeout(resolve, 5));
   }
   shutdown?.();
