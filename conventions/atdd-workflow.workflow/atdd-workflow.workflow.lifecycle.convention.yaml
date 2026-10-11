@@ -62,6 +62,64 @@ content:
     Start from the current seat, checkpoint, assigned tasks, and relevant thread records. A replacement
     agent resumes from those records; it does not depend on a conversation with its predecessor.
 
+    Context handover: every seat (main, coordinator, driver, operator) stops at 80% context usage.
+    It finishes or cleanly undoes the current atomic step (commit, post, receipt) and starts nothing
+    new. It writes a handover using the template below, validates it with
+    `atdd-flow handover <address> --check --file <path>`, fixes every reported problem, and records
+    it with `atdd-flow handover <address> --file <path>`. The seat's handover.yaml is the one durable
+    handover record; it sits beside the checkpoint and never replaces it. The old session then makes
+    no further tool calls, and a fresh session bound to the same seat continues. The new session reads
+    the instruction file, then `atdd-flow handover show <address>`, runs the handover's verification,
+    reconciles it with the live Desk (the Desk wins), reconciles its inbox, reports
+    `RESUMED; verified N/M; discrepancies: ...` through its normal reporting route, and continues.
+    A handover points to toolkit conventions and never restates or overrides them; read a convention
+    when its phase is acted on, not all on resume. 150 lines is a ceiling, not a target. List open
+    items only, use exact IDs, and mark state [verified|assumed]. Recording rejects a missing or
+    malformed header or Runtime line, a missing, duplicate, or out-of-order section, more than
+    150 lines, a supersedes value other than the recorded handover id (or none when none is recorded),
+    and vague references: the words latest, newest, and most recent, and that/this/those/these/same/
+    previous/earlier/above/last/aforementioned followed by PR, pull request, task, thread, message,
+    commit, branch, handover, session, issue, or release without an exact identifier (one containing
+    a digit, @, or /). Template:
+
+      HANDOVER <seat-address> | <UTC ts> | handover-id <id> | supersedes <id|none>
+      Runtime: <application> <session>:<pane> | <agent> session <id> | model <provider/model> | context <NN>%
+
+      1. SEAT, AUTHORITY, TOOLKIT AND HAZARDS
+      - Seat: <address> (<role>), project <project>; reports to <addr>; directs <addrs|none>
+      - Worktree: <path> @ <branch> <sha> (<clean | dirty: files>)
+      - Toolkit in force (this worktree): Flow <ver> / Bun <ver> | declared=locked=installed: <yes | NOT CURRENT: detail> | runtime binding: <Flow ver | unverified>
+      - Governing conventions for current phase: <convention ids> (pointers only)
+      - Profile/ratchet state: <profile> <reject-new|strict> | activated ratchets (never modify): <list|none>
+      - Authorizations in force: <scope> | granted by <addr> | ref <msg-id> | expires <ts|never>
+      - Seat-specific constraints (beyond the instruction file): <list|none>
+      - Hazards / known bugs / workarounds: <list|none>
+      - Dead ends (tried, failed, do not repeat): <what> | ref <id> (or none)
+
+      2. OPEN WORK AND IN-FLIGHT OPERATIONS
+      - <project>/<task-id> | <status/phase> | assignee <addr> | [verified|assumed]
+        ref: <PR#/sha/pane>; last evidence <msg-id>; state: <one line>
+      - IN-FLIGHT: <operation> | started <ts> | check: <exact command> | retry-safe: <yes|no|why>
+      - Session-only knowledge: <facts learned, not recorded in Desk> (or none)
+
+      3. DEPENDENCIES (both directions)
+      - WAITING ON: <what> | <addr> | since <ts> | ref <msg-id> | follow up at <ts>
+      - OWED BY ME: <what> | to <addr> | due <ts> | ref <msg-id>
+      - DECISION PENDING: <question> | owner <addr> | options A/B + recommendation | ref <id>
+      - RECEIVED, NOT YET ACTED ON: <msg-id> | from <addr> | needed action
+      (or: none, per subsection)
+
+      4. RESUME PROCEDURE AND NEXT ACTIONS
+      Verify first:
+      - atdd-flow status seat <address>
+      - atdd-flow task open <project> <task-id>   (each open task)
+      - git -C <worktree> status && git log -1
+      - installed toolkit versions in <worktree> match section 1 (mismatch = discrepancy; report, do not self-upgrade)
+      - <each IN-FLIGHT check command>
+      Then, in order:
+      1. Read inbox; receipt pending messages lacking my receipt.
+      2. <concrete action with exact IDs>
+
     `operator@desk` is the human authority, not an autonomous agent identity. Never post, approve,
     or make a decision while claiming that address unless the human operator actually supplied it.
     Main seats are the normal repository-main integration gateway to the operator. Coordinators may

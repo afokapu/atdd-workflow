@@ -44,7 +44,7 @@ function handover(options: { seat?: string; id?: string; supersedes?: string; om
     ])],
     2: ["2. OPEN WORK AND IN-FLIGHT OPERATIONS", ...(options.sections?.two ?? [
       "- demo/delivery | in_progress/red | assignee driver.delivery@demo | [verified]",
-      "  ref: PR #42 at commit d60116f; last evidence M-20261011T010634Z-plan_b117c6a7; state: RED committed",
+      "  ref: PR #42 at commit d60116f; last evidence M-20261011T010000Z-plan_0000aaaa; state: RED committed",
     ])],
     3: ["3. DEPENDENCIES (both directions)", ...(options.sections?.three ?? ["- WAITING ON: none", "- OWED BY ME: none"])],
     4: ["4. RESUME PROCEDURE AND NEXT ACTIONS", ...(options.sections?.four ?? [
@@ -59,7 +59,7 @@ function handover(options: { seat?: string; id?: string; supersedes?: string; om
   const order = options.order ?? [1, 2, 3, 4];
   const lines = [
     `HANDOVER ${options.seat ?? seatAddress} | 2026-10-11T01:00:00Z | handover-id ${options.id ?? "H-20261011-1"} | supersedes ${options.supersedes ?? "none"}`,
-    "Runtime: herdr forge:w5A:p1 | pi session c9946303 | model pi-claude-cli/claude-opus-5-5 | context 80%",
+    "Runtime: herdr session-a:pane-1 | pi session S-example-1 | model provider/model | context 80%",
     "",
   ];
   for (const number of order) {
@@ -171,7 +171,7 @@ test("RED: exact identifiers and plain prose without vague tokens are accepted",
   const { root, handoverFile } = await fixture();
   const text = handover({ sections: { two: [
     "- demo/delivery | in_progress/red | assignee driver.delivery@demo | [verified]",
-    "  ref: that PR #42 at commit d60116f, thread T-20261011T010602Z-delivery_9a2c9b1c; state: RED committed",
+    "  ref: that PR #42 at commit d60116f, thread T-20261011T010000Z-delivery_0000bbbb; state: RED committed",
     "  Session-only knowledge: the fixture helper builds an isolated Desk and must stay test-only.",
   ] } });
   const result = await invoke(root, "handover", seatAddress, "--file", await source(root, "exact.txt", text));
