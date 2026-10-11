@@ -237,3 +237,67 @@ test("RED: a live workspace without a checkout path never matches a projection t
   expect(calls).not.toContain("workspace rename wx");
   expect(calls).not.toContain("--workspace wx");
 });
+
+/** In-process Herdr stub whose workspace list reflects earlier creates; created primaries report no checkout path. */
+function statefulHerdr(initial: Array<Record<string, unknown>>) {
+  const workspaces = [...initial];
+  const tabs: Array<{ tab_id: string; workspace_id: string; label?: string }> = [];
+  const panes: Array<{ pane_id: string; tab_id: string; label?: string }> = [];
+  const calls: string[] = [];
+  let next = 0;
+  const command = async (args: string[]) => {
+    const rest = args.slice(3);
+    calls.push(rest.join(" "));
+    const flag = (name: string) => rest[rest.indexOf(name) + 1];
+    const reply = (result: unknown) => JSON.stringify({ result });
+    switch (`${rest[0]}:${rest[1]}`) {
+      case "workspace:list": return reply({ workspaces });
+      case "workspace:create":
+      case "worktree:open": {
+        const id = `w${++next}`;
+        // Observed Herdr behavior for a non-code primary checkout: the listed workspace has worktree=null.
+        workspaces.push({ workspace_id: id, label: flag("--label"), worktree: rest[0] === "worktree" ? { checkout_path: flag("--path") } : null });
+        tabs.push({ tab_id: `${id}:t1`, workspace_id: id }); panes.push({ pane_id: `${id}:p1`, tab_id: `${id}:t1` });
+        return reply({ workspace: { workspace_id: id }, root_tab: { tab_id: `${id}:t1` }, root_pane: { pane_id: `${id}:p1` } });
+      }
+      case "tab:list": return reply({ tabs: tabs.filter((tab) => tab.workspace_id === flag("--workspace")) });
+      case "tab:create": {
+        const id = `${flag("--workspace")}:t${tabs.length + 1}`;
+        tabs.push({ tab_id: id, workspace_id: flag("--workspace"), label: flag("--label") }); panes.push({ pane_id: `${id}:p`, tab_id: id });
+        return reply({ tab: { tab_id: id }, root_pane: { pane_id: `${id}:p` } });
+      }
+      case "tab:rename": { const tab = tabs.find((entry) => entry.tab_id === rest[2]); if (tab) tab.label = rest[3]; return reply({}); }
+      case "pane:list": { const ids = new Set(tabs.filter((tab) => tab.workspace_id === flag("--workspace")).map((tab) => tab.tab_id)); return reply({ panes: panes.filter((pane) => ids.has(pane.tab_id)) }); }
+      case "pane:rename": { const pane = panes.find((entry) => entry.pane_id === rest[2]); if (pane) pane.label = rest[3]; return reply({}); }
+      default: return reply({});
+    }
+  };
+  return { command, calls };
+}
+
+test("RED: a primary workspace listed without a checkout path is reused by its exact project label on every projection", async () => {
+  const fixture = await desk();
+  const herdr = statefulHerdr([]);
+  const first = await projectHerdrSeat(fixture.site, "main@demo", "chosen", herdr.command);
+  const second = await projectHerdrSeat(fixture.site, "main@demo", "chosen", herdr.command);
+  expect(second.workspace).toBe(first.workspace);
+  expect(herdr.calls.filter((call) => call.startsWith("workspace create")).length).toBe(1);
+  expect(herdr.calls.some((call) => call.startsWith("workspace rename"))).toBe(false);
+});
+
+test("a no-checkout workspace with a different label is never adopted or renamed as the primary", async () => {
+  const fixture = await desk();
+  const herdr = statefulHerdr([{ workspace_id: "wx", label: "scratch", worktree: null }]);
+  const projected = await projectHerdrSeat(fixture.site, "main@demo", "chosen", herdr.command);
+  expect(projected.workspace).not.toBe("wx");
+  expect(herdr.calls).toContain(`workspace create --cwd ${fixture.repository} --label demo --no-focus`);
+  expect(herdr.calls.some((call) => call.includes("wx"))).toBe(false);
+});
+
+test("a linked seat target still requires a checkout path even when a no-checkout workspace carries its label", async () => {
+  const fixture = await desk();
+  const herdr = statefulHerdr([{ workspace_id: "wl", label: "coordinator.integration@demo", worktree: null }]);
+  const projected = await projectHerdrSeat(fixture.site, "coordinator.integration@demo", "chosen", herdr.command);
+  expect(projected.workspace).not.toBe("wl");
+  expect(herdr.calls.some((call) => call.startsWith(`worktree open --workspace w1 --path ${fixture.integration}`))).toBe(true);
+});
