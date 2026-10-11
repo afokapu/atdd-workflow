@@ -6,6 +6,7 @@ import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { clearStaleRuntimeState, clearRuntimeState, heartbeatRuntimeState, ownsRuntimeState, registerRuntimeState, runtimeOwnerToken, withOwnedRuntimeState } from "../../src/runtime-state";
 import { paths, readYaml, type Seat } from "../../src/core";
 import { directiveNotice, nextDirective } from "../../src/tasks";
+import { runtimeStartupInstruction } from "../../src/collaboration-policy";
 
 type Thread = { id?: unknown; participants?: unknown; subject?: unknown };
 export type Mail = { id?: unknown; from?: unknown; to?: unknown; subject?: unknown; created_at?: unknown };
@@ -63,7 +64,6 @@ const defaultHeartbeatMs = 15_000;
 const defaultStaleAfterMs = 60_000;
 const defaultActivationIntervalMs = 25;
 const defaultActivationTimeoutMs = 60_000;
-const lifecycleConventionPath = "conventions/atdd-workflow.workflow/atdd-workflow.workflow.lifecycle.convention.yaml";
 
 function participants(thread: Thread) {
   return Array.isArray(thread.participants) && thread.participants.every((entry) => typeof entry === "string") ? thread.participants as string[] : [];
@@ -358,7 +358,7 @@ export default function (pi: ExtensionAPI) {
       root, seat, piSession, herdrSession, pane,
       activate: async () => {
         if (!await current.activate()) return;
-        pi.sendMessage({ customType: "atdd-flow-start", content: `SYSTEM: you are ${seat}. Read your durable seat and assigned work with: atdd-flow open ${seat}. Convention: ${lifecycleConventionPath}. Continue assigned in_progress work until it is review-ready or explicitly blocked.`, display: true, details: { seat, root } }, { triggerTurn: true, deliverAs: "followUp" });
+        pi.sendMessage({ customType: "atdd-flow-start", content: runtimeStartupInstruction(seat), display: true, details: { seat, root } }, { triggerTurn: true, deliverAs: "followUp" });
         await sendTaskDirective(pi, root, seat);
         if (ctx.hasUI) ctx.ui.notify(`ATDD Flow native mail active for ${seat}`, "info");
       },

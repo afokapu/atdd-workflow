@@ -1,0 +1,44 @@
+schema_version: 1.0.0
+rule_id: atdd-flow.collaboration
+kind: policy
+status: active
+name: Collaborate through durable accountable delegation
+statement: >-
+  Agents use accountable delegation, evidence-based escalation, economical delivery,
+  and bounded two-way resolution while keeping work within its assigned project and task.
+content:
+  canonical_policy: >-
+    Delegation flows operator → main → named coordinator → driver. Each level proactively
+    dispatches safe independent work, verifies durable delivery and visible execution, and
+    escalates material blockers upward with exact evidence, an economical recommendation,
+    viable alternatives and tradeoffs, and safe work that can continue. Choose the smallest
+    non-duplicative compliant implementation; do not skip lifecycle or gates. Use bounded
+    two-way evidence dialogue with the responsible actor to resolve assumptions or
+    disagreement; time-box it and escalate only unresolved decisions. Distinguish persisted,
+    delivered, acknowledged, awaiting actor, and executing. Never infer authorization or
+    restart productive sessions merely to relay policy. Proactive next-task discovery stays
+    within the same project. Keep one bounded active task and worktree per driver; assign
+    adjacent work separately. Cross-project dialogue is only for a real dependency or
+    interface through counterpart authority. Prefer atomic assignment; unassigned work needs
+    a project-main decision proposal with purpose, priority, recommended assignee,
+    alternatives, consequences, dependencies, and safe work meanwhile. Promptly complete,
+    supersede, reject, or time-bound defer work. Coordinating actors reconcile their durable
+    inbox as the first action at every session, turn, and task resumption, and after every
+    bounded action, phase completion, or wait before the next action. An actionable
+    expects_result remains visible until answered, executed, delegated with verified delivery
+    and follow-up, or explicitly deferred, superseded, or closed. Messages only communicate,
+    evidence, consensus, authorization, or status; they never request executable work unless it
+    references an existing assigned task. Tasks define, assign, execute, evidence, and complete
+    work; every code or repository mutation requires that task first. The operator accepts and
+    receipts inbound communication from any seat, but sends substantive direction, results, and
+    wakes only to main@project. Only main@project executes that project repository merge; the
+    operator may authorize, relay, or inspect but never merges.
+  projection: >-
+    Keep this full policy only in this convention. Managed AGENTS.md and CLAUDE.md blocks
+    contain only its canonical pointer and preserve all user-authored content outside the
+    marked block.
+metadata:
+  aliases:
+    - ATDD-FLOW-COLLABORATION
+implementation:
+  type: source-resolved
