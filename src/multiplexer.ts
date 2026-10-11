@@ -191,15 +191,23 @@ async function liveWorkspaces(session: string, command: HerdrCommand) {
 }
 
 /** A live workspace without a checkout path never matches: resolve("") would be the process cwd. */
-function matchWorkspace(workspaces: Workspace[], worktree: string) {
-  return workspaces.find((entry) => {
+/**
+ * Herdr may list a primary workspace created for a non-code checkout with no checkout path. Such a
+ * workspace matches only the primary target, and only by its exact project label (so it is never
+ * renamed); linked seat targets always require a checkout path.
+ */
+function matchWorkspace(workspaces: Workspace[], target: Target) {
+  const checkoutOf = (entry: Workspace) => {
     const checkout = entry.worktree?.checkout_path;
-    return typeof checkout === "string" && checkout !== "" && resolve(checkout) === worktree;
-  });
+    return typeof checkout === "string" && checkout !== "" ? checkout : undefined;
+  };
+  const byCheckout = workspaces.find((entry) => { const checkout = checkoutOf(entry); return checkout !== undefined && resolve(checkout) === target.worktree; });
+  if (byCheckout || target.workspaceLabel !== target.project) return byCheckout;
+  return workspaces.find((entry) => checkoutOf(entry) === undefined && entry.label === target.project);
 }
 
 async function ensureWorkspace(session: string, target: Target, workspaces: Workspace[], command: HerdrCommand, primary?: WorkspaceState) {
-  let current = matchWorkspace(workspaces, target.worktree);
+  let current = matchWorkspace(workspaces, target);
   if (!current) {
     const args = target.workspaceLabel === target.project
       ? ["workspace", "create", "--cwd", target.worktree, "--label", target.workspaceLabel, "--no-focus"]
@@ -297,9 +305,9 @@ export async function multiplexer(root: string, args: string[]) {
   const command: HerdrCommand = herdr;
   const workspaces = await liveWorkspaces(session, command);
   if (action === "status") {
-    const present = desired.filter((target) => matchWorkspace(workspaces, target.worktree));
+    const present = desired.filter((target) => matchWorkspace(workspaces, target));
     const topology = await Promise.all(desired.map(async (target) => {
-      const workspace = matchWorkspace(workspaces, target.worktree);
+      const workspace = matchWorkspace(workspaces, target);
       return workspace ? topologyCompliant(session, target, workspace, command) : false;
     }));
     console.log(JSON.stringify({ schema: "atdd-workflow/multiplexer-status/v1", application: "herdr", session, desired: desired.length, present: present.length, topology_compliant: topology.filter(Boolean).length, unprojected }, null, 2));
