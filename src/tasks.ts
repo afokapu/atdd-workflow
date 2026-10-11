@@ -1,7 +1,7 @@
-import { readdir } from "node:fs/promises";
-import { resolve } from "node:path";
+import { readdir, realpath } from "node:fs/promises";
+import { basename, dirname, join, resolve } from "node:path";
 import {
-  type Checkpoint, type Seat, atomicYaml, canonicalAddress, now, paths, project, readYaml, required, runOutput, seat, taskId, values, words,
+  type Checkpoint, type Seat, atomicYaml, canonicalAddress, exists, now, paths, project, readYaml, required, runOutput, seat, taskId, values, words,
 } from "./core";
 
 export type TaskStatus = "todo" | "in_progress" | "review" | "done";
@@ -142,15 +142,47 @@ async function governedBase(root: string, projectName: string, coordinatorAddres
 }
 
 async function retireAssignee(root: string, projectName: string, id: string, task: Task) {
-  const assignee = required(task.assignee, `an assignee for task ${id}`);
+  return retireDriver(root, projectName, required(task.assignee, `an assignee for task ${id}`), id);
+}
+
+/**
+ * Retires an idle driver: every other assigned task must be done, ATDD Bun removes the clean and
+ * merged worktree, the seat records retirement and a checkpoint, then its workspace may close.
+ */
+/** Resolves symlinks through the nearest existing ancestor so an absent path compares with Git's paths. */
+async function canonicalPath(path: string): Promise<string> {
+  const absolute = resolve(path);
+  try { return await realpath(absolute); }
+  catch { return dirname(absolute) === absolute ? absolute : join(await canonicalPath(dirname(absolute)), basename(absolute)); }
+}
+
+/**
+ * A recorded worktree that is absent from disk and from the repository's `git worktree list` has
+ * nothing left to finish. Any other state, including a registered-but-missing path, fails closed.
+ */
+async function absentUnregisteredWorktree(root: string, projectName: string, owner: Seat) {
+  if (await exists(owner.worktree)) return undefined;
+  const repository = required((await project(root, projectName)).repository, `a repository for project ${projectName}`);
+  const target = await canonicalPath(owner.worktree);
+  const listed = (await runOutput(["git", "-C", repository, "worktree", "list", "--porcelain"])).split("\n")
+    .filter((line) => line.startsWith("worktree ")).map((line) => line.slice("worktree ".length));
+  for (const path of listed) {
+    if (await canonicalPath(path) === target) throw new Error(`Worktree ${owner.worktree} is missing but still registered with Git; prune or restore it before retiring ${owner.address}.`);
+  }
+  return `Worktree ${owner.worktree} is absent and unregistered; retired without worktree finish; branch ${owner.branch} retained.`;
+}
+
+async function retireDriver(root: string, projectName: string, assignee: string, id: string, allowAbsentWorktree = false) {
   const unfinished = (await allTasks(root, projectName))
     .filter((entry) => entry.id !== id && entry.task.assignee === assignee && entry.task.status !== "done")
     .map((entry) => entry.id);
   if (unfinished.length) throw new Error(`Cannot retire ${assignee}; it still owns unfinished tasks: ${unfinished.join(", ")}.`);
 
   const owner = await seat(root, assignee);
+  if (owner.retired) throw new Error(`Seat ${assignee} is already retired.`);
   try {
-    const summary = await runOutput(["atdd-bun", "worktree", "finish", "--delete-branch"], owner.worktree);
+    const summary = (allowAbsentWorktree ? await absentUnregisteredWorktree(root, projectName, owner) : undefined)
+      ?? await runOutput(["atdd-bun", "worktree", "finish", "--delete-branch"], owner.worktree);
     owner.retired = { task: `${projectName}/${id}`, completed_at: now(), summary };
     await atomicYaml(paths(root).seatFile(assignee), owner);
     const checkpoint: Checkpoint = {
@@ -170,6 +202,26 @@ async function retireAssignee(root: string, projectName: string, id: string, tas
     await atomicYaml(paths(root).checkpointFile(assignee), checkpoint);
     throw error;
   }
+  const { closeRetiredDriverWorkspace } = await import("./multiplexer");
+  await closeRetiredDriverWorkspace(root, owner);
+}
+
+/** Retires a driver whose assigned tasks are all already done. */
+export async function retireSeat(root: string, address: string, args: string[]) {
+  const resolved = await canonicalAddress(root, address);
+  const actor = await canonicalAddress(root, required(words(args, "--by"), "--by"));
+  const owner = await seat(root, resolved);
+  if (owner.role !== "driver") throw new Error(`Only driver seats can be retired; ${resolved} is ${owner.role}.`);
+  if (owner.retired) throw new Error(`Seat ${resolved} is already retired.`);
+  const owned = (await allTasks(root, owner.project)).filter((entry) => entry.task.assignee === resolved);
+  if (!owned.length) throw new Error(`Cannot retire ${resolved}; it has no assigned tasks.`);
+  const unfinished = owned.filter((entry) => entry.task.status !== "done").map((entry) => entry.id);
+  if (unfinished.length) throw new Error(`Cannot retire ${resolved}; it still owns unfinished tasks: ${unfinished.join(", ")}.`);
+  if (actor !== `main@${owner.project}` && owned.some((entry) => entry.task.coordinator !== actor)) {
+    throw new Error(`Only main@${owner.project} or the coordinator of every task assigned to ${resolved} may retire it.`);
+  }
+  await retireDriver(root, owner.project, resolved, owned.at(-1)!.id, true);
+  console.log(`${resolved}  retired`);
 }
 
 export async function add(root: string, projectName: string, id: string, args: string[]) {

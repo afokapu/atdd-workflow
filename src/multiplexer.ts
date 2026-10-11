@@ -1,6 +1,6 @@
 import { readdir } from "node:fs/promises";
 import { join, resolve } from "node:path";
-import { exists, paths, project, readYaml, runOutput, type Project, type Seat } from "./core";
+import { desk, exists, paths, project, readYaml, runOutput, type Project, type Seat } from "./core";
 import { seatTasks } from "./tasks";
 
 export type HerdrPolicy = {
@@ -26,7 +26,7 @@ export type HerdrPolicy = {
 
 type Workspace = { workspace_id: string; label?: string; worktree?: { checkout_path?: string } };
 type Tab = { tab_id: string; workspace_id: string; label?: string };
-type Pane = { pane_id: string; tab_id: string; label?: string };
+type Pane = { pane_id: string; tab_id: string; label?: string; agent_status?: string };
 type Target = { project: string; worktree: string; workspaceLabel: string; seat?: Seat };
 type WorkspaceState = { id: string; label: string; worktree: string; rootTab?: string; rootPane?: string };
 type HerdrCommand = (command: string[]) => Promise<string>;
@@ -77,7 +77,7 @@ export async function herdrPolicy() {
   return value;
 }
 
-async function projectSeats(root: string, projectName: string) {
+async function projectSeats(root: string, projectName: string, includeRetired = false) {
   const folder = paths(root).seats(projectName);
   let names: string[];
   try { names = await readdir(folder); }
@@ -86,7 +86,29 @@ async function projectSeats(root: string, projectName: string) {
     const file = join(folder, name, "seat.yaml");
     return await exists(file) ? readYaml<Seat>(file) : undefined;
   }));
-  return seats.filter((entry): entry is Seat => Boolean(entry && entry.schema === "atdd-workflow/seat/v2" && !entry.retired));
+  return seats.filter((entry): entry is Seat => Boolean(entry && entry.schema === "atdd-workflow/seat/v2" && (includeRetired || !entry.retired)));
+}
+
+type Liveness = (entry: Seat) => Promise<boolean>;
+
+/** A bound Herdr pane is live only when Herdr still reports that exact pane running an agent. */
+const livePane = (session: string, command: HerdrCommand): Liveness => async (entry) => {
+  const binding = entry.runtime?.addresses?.herdr;
+  if (!binding) return false;
+  const pane = typeof binding === "string" ? binding : binding.pane;
+  const owner = typeof binding === "string" ? session : binding.session;
+  try {
+    const value = json(await command(["herdr", "--session", owner, "pane", "get", pane]));
+    const report = value?.pane ?? value;
+    return report?.pane_id === pane && typeof report.agent === "string" && report.agent !== "";
+  } catch { return false; }
+};
+
+/** A driver is active for blanket projection only with unblocked in-progress work or a live bound runtime. */
+async function activeDriver(root: string, projectName: string, entry: Seat, live?: Liveness) {
+  const owned = (await seatTasks(root, projectName, entry.address)).filter(({ task }) => task.assignee === entry.address);
+  if (owned.some(({ task }) => task.status === "in_progress" && !task.blocker)) return true;
+  return live ? live(entry) : false;
 }
 
 export type UnprojectedSeat = { address: string; reason: string };
@@ -130,7 +152,7 @@ function assertNewTopologyPlacement(config: Project, entry: Seat, primary: strin
  * A misplaced seat is skipped and recorded in `unprojected` so it never aborts projection of other
  * seats; requesting that seat explicitly (`strict`) still rejects.
  */
-async function targets(root: string, options: { strict?: string; unprojected?: UnprojectedSeat[] } = {}): Promise<Target[]> {
+async function targets(root: string, options: { strict?: string; unprojected?: UnprojectedSeat[]; live?: Liveness; activeDrivers?: Set<string> } = {}): Promise<Target[]> {
   let projects: string[];
   try { projects = await readdir(paths(root).work); }
   catch { return []; }
@@ -153,14 +175,20 @@ async function targets(root: string, options: { strict?: string; unprojected?: U
         result.push({ project: name, worktree: primary, workspaceLabel: name, seat: entry });
         continue;
       }
-      if (entry.role === "coordinator" && resolve(entry.worktree) !== primary) {
-        result.push({ project: name, worktree: resolve(entry.worktree), workspaceLabel: entry.address, seat: entry });
+      let linked = entry.role === "coordinator" && resolve(entry.worktree) !== primary;
+      if (entry.role === "driver") {
+        // An explicit per-seat projection keeps the established assigned-work rule.
+        linked = entry.address === options.strict
+          ? (await seatTasks(root, name, entry.address)).some(({ task }) => task.assignee === entry.address && task.status !== "done")
+          : await activeDriver(root, name, entry, options.live);
+        if (linked) options.activeDrivers?.add(entry.address);
+      }
+      if (!linked) continue;
+      if (entry.address !== options.strict && !await exists(entry.worktree)) {
+        options.unprojected?.push({ address: entry.address, reason: `Worktree ${resolve(entry.worktree)} does not exist.` });
         continue;
       }
-      if (entry.role === "driver") {
-        const active = (await seatTasks(root, name, entry.address)).some(({ task }) => task.assignee === entry.address && task.status !== "done");
-        if (active) result.push({ project: name, worktree: resolve(entry.worktree), workspaceLabel: entry.address, seat: entry });
-      }
+      result.push({ project: name, worktree: resolve(entry.worktree), workspaceLabel: entry.address, seat: entry });
     }
   }
   return result;
@@ -279,6 +307,79 @@ export async function projectHerdrSeat(root: string, address: string, session: s
   return (await ensureTarget(session, target, workspaces, command, primary))!;
 }
 
+type StaleWorkspace = { workspace: Workspace; address: string };
+
+async function commonDirectory(path: string) {
+  return runOutput(["git", "-C", path, "rev-parse", "--path-format=absolute", "--git-common-dir"]);
+}
+async function topLevel(path: string) {
+  return runOutput(["git", "-C", path, "rev-parse", "--show-toplevel"]);
+}
+
+/** True when a checkout no longer exists or is a linked (non-primary) worktree of the primary repository. */
+async function linkedOrMissing(checkout: string, primary: string) {
+  if (!await exists(checkout)) return true;
+  try {
+    return await commonDirectory(checkout) === await commonDirectory(primary) && await topLevel(checkout) !== await topLevel(primary);
+  } catch { return false; }
+}
+
+/**
+ * A stale workspace carries a Desk driver seat label (retired or inactive) and a checkout that is a
+ * linked worktree of that seat's Desk project, or no longer exists. Every other workspace is ignored.
+ */
+async function staleWorkspaces(root: string, workspaces: Workspace[], activeDrivers: Set<string>) {
+  let projects: string[];
+  try { projects = await readdir(paths(root).work); }
+  catch { return []; }
+  const result: StaleWorkspace[] = [];
+  for (const name of projects) {
+    let config: Project;
+    try { config = await project(root, name); }
+    catch { continue; }
+    if (!config.repository) continue;
+    const primary = resolve(config.repository);
+    const drivers = (await projectSeats(root, name, true)).filter((entry) => entry.role === "driver" && !activeDrivers.has(entry.address));
+    for (const entry of drivers) {
+      for (const workspace of workspaces.filter((candidate) => candidate.label === entry.address)) {
+        const checkout = workspace.worktree?.checkout_path;
+        if (typeof checkout !== "string" || checkout === "" || resolve(checkout) === primary) continue;
+        if (await linkedOrMissing(checkout, primary)) result.push({ workspace, address: entry.address });
+      }
+    }
+  }
+  return result;
+}
+
+/** Closes one stale workspace unless any of its agents is working or blocked. */
+async function closeStale(session: string, stale: StaleWorkspace, command: HerdrCommand) {
+  const busy = (await panes(session, stale.workspace.workspace_id, command)).find((entry) => entry.agent_status === "working" || entry.agent_status === "blocked");
+  if (busy) return `kept  ${stale.address}  ${stale.workspace.workspace_id}: agent in ${busy.pane_id} is ${busy.agent_status}`;
+  await command(["herdr", "--session", session, "workspace", "close", stale.workspace.workspace_id]);
+  return `closed  ${stale.address}  ${stale.workspace.workspace_id}`;
+}
+
+const closeInactive = async (root: string) => (await desk(root)).multiplexer?.close_inactive === true;
+
+/**
+ * Closes the workspace of a just-retired driver when the Desk enables close_inactive. Closing is
+ * best-effort housekeeping: it reports, and never undoes the completed retirement.
+ */
+export async function closeRetiredDriverWorkspace(root: string, entry: Seat, command: HerdrCommand = herdr, environment: Record<string, string | undefined> = process.env) {
+  try {
+    const config = await desk(root);
+    if (config.multiplexer?.close_inactive !== true) return;
+    const binding = entry.runtime?.addresses?.herdr;
+    const session = (binding && typeof binding !== "string" ? binding.session : undefined) ?? environment.HERDR_SESSION ?? config.herdr_session;
+    if (!session) return;
+    const workspaces = (await liveWorkspaces(session, command)).filter((workspace) => workspace.label === entry.address);
+    if (!workspaces.length) return;
+    for (const stale of await staleWorkspaces(root, workspaces, new Set())) console.log(await closeStale(session, stale, command));
+  } catch (error) {
+    console.log(`Workspace close for ${entry.address} was not completed: ${(error as Error).message}`);
+  }
+}
+
 async function topologyCompliant(session: string, target: Target, workspace: Workspace, command: HerdrCommand) {
   if (workspace.label !== target.workspaceLabel) return false;
   if (!target.seat) return true;
@@ -301,16 +402,19 @@ export async function multiplexer(root: string, args: string[]) {
     return;
   }
   const unprojected: UnprojectedSeat[] = [];
-  const desired = await targets(root, { unprojected });
   const command: HerdrCommand = herdr;
+  const activeDrivers = new Set<string>();
+  const desired = await targets(root, { unprojected, live: livePane(session, command), activeDrivers });
   const workspaces = await liveWorkspaces(session, command);
+  const stale = await staleWorkspaces(root, workspaces, activeDrivers);
+  const close = await closeInactive(root);
   if (action === "status") {
     const present = desired.filter((target) => matchWorkspace(workspaces, target));
     const topology = await Promise.all(desired.map(async (target) => {
       const workspace = matchWorkspace(workspaces, target);
       return workspace ? topologyCompliant(session, target, workspace, command) : false;
     }));
-    console.log(JSON.stringify({ schema: "atdd-workflow/multiplexer-status/v1", application: "herdr", session, desired: desired.length, present: present.length, topology_compliant: topology.filter(Boolean).length, unprojected }, null, 2));
+    console.log(JSON.stringify({ schema: "atdd-workflow/multiplexer-status/v1", application: "herdr", session, desired: desired.length, present: present.length, topology_compliant: topology.filter(Boolean).length, stale: stale.length, close_inactive: close, unprojected }, null, 2));
     return;
   }
   const primary = new Map<string, WorkspaceState>();
@@ -325,5 +429,8 @@ export async function multiplexer(root: string, args: string[]) {
     await ensureTarget(session, target, workspaces, command, projectPrimary);
   }
   for (const entry of unprojected) console.log(`unprojected  ${entry.address}: ${entry.reason}`);
+  for (const entry of stale) {
+    console.log(close ? await closeStale(session, entry, command) : `stale  ${entry.address}  ${entry.workspace.workspace_id}: close_inactive is off`);
+  }
   console.log(`Projected ${desired.length} Desk seat worktree(s) into Herdr session ${session}.`);
 }

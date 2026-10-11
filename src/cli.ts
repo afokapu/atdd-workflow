@@ -44,6 +44,7 @@ Usage:
   atdd-flow task import <project> <task-id> --proof <reference> [--proof <reference> ...] [--done-when <text> ...] [--source <reference>]
   atdd-flow task start|review|return <project> <task-id> --by <address>
   atdd-flow task done <project> <task-id> --by <address> [--retire-assignee]
+  atdd-flow seat retire <address> --by <coordinator-or-main>
   atdd-flow task prove <project> <task-id> --by <address> --item <number> --proof <reference>
   atdd-flow task handoff <project> <task-id> --by <assignee> --phase <plan|red|green|refactor> --evidence <message-or-reference>
   atdd-flow task respond <project> <task-id> --by <coordinator> --outcome <accept|return> --phase <plan|red|green|refactor>
@@ -135,6 +136,10 @@ async function main() {
       if (subcommand === "list") return tasks.list(root, required(projectName, "project"), rest.slice(2));
       if (subcommand === "open") return tasks.open(root, required(projectName, "project"), required(taskId, "task id"));
       throw new Error("Use `atdd-flow task add|assign|transfer|amend|import|start|prove|handoff|respond|review|return|done|block|unblock|list|open`.");
+    },
+    seat: async () => {
+      if (rest[0] === "retire") return tasks.retireSeat(root, required(rest[1], "address"), rest.slice(2));
+      throw new Error("Use `atdd-flow seat retire <address> --by <coordinator-or-main>`.");
     },
     cleanup: async () => {
       const [subcommand, projectName, taskId] = rest;

@@ -70,7 +70,7 @@ project: demo
 worktree: ${driver}
 branch: delivery/active
 `),
-    writeFile(join(tasks, "W-active.yaml"), "schema: atdd-workflow/task/v1\ntitle: Active\nstatus: todo\ncoordinator: coordinator.primary@demo\nassignee: driver.active@demo\ndone_when: [{ text: Delivered }]\n"),
+    writeFile(join(tasks, "W-active.yaml"), "schema: atdd-workflow/task/v1\ntitle: Active\nstatus: in_progress\ncoordinator: coordinator.primary@demo\nassignee: driver.active@demo\ndone_when: [{ text: Delivered }]\n"),
   ]);
   return { root, site, repository, integration, driver };
 }

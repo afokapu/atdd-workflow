@@ -17,6 +17,8 @@ export type Desk = {
   application: string;
   /** Native Herdr session used for Desk notifications when application is herdr. */
   herdr_session?: string;
+  /** Optional multiplexer housekeeping; inactive driver workspaces are closed only when enabled. */
+  multiplexer?: { close_inactive?: boolean };
   /** Named commands that model portfolio entries may resolve through. */
   executables?: Record<string, string>;
   aliases?: Record<string, string>;
