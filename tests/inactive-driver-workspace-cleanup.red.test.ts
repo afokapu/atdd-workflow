@@ -254,3 +254,74 @@ test("RED: an already-DONE driver can be retired by its coordinator, which also 
   expect(calls).toContain("--session chosen workspace close wFinished");
   expect(calls).not.toContain("workspace close wPrimary");
 });
+
+test("guard: without close_inactive, status still reports stale workspaces but apply never closes them", async () => {
+  const fixture = await mixedSession();
+  const deskFile = join(fixture.site, "desk.yaml");
+  await writeFile(deskFile, stringify({ ...parse(await readFile(deskFile, "utf8")), multiplexer: { close_inactive: false } }));
+  expect(JSON.parse(await run(fixture.site, fixture.herdr.environment, "multiplexer", "status", "herdr", "--session", "chosen"))).toMatchObject({ stale: 2, close_inactive: false });
+  const output = await run(fixture.site, fixture.herdr.environment, "multiplexer", "apply", "herdr", "--session", "chosen");
+  expect(output).toContain("driver.done@demo");
+  expect(await fixture.herdr.calls()).not.toContain("workspace close");
+});
+
+test("guard: a blocked agent keeps its stale workspace open and is reported", async () => {
+  const fixture = await desk(["waiting"]);
+  await finishTask(fixture.site, fixture.clean, "driver.waiting@demo", "W-waiting");
+  const herdr = await fakeHerdr(fixture.root, [
+    { id: "wPrimary", label: "demo", path: fixture.repository },
+    { id: "wWaiting", label: "driver.waiting@demo", path: join(fixture.worktrees, "waiting"), agent: "blocked" },
+  ]);
+  const output = await run(fixture.site, herdr.environment, "multiplexer", "apply", "herdr", "--session", "chosen");
+  expect(output).toContain("driver.waiting@demo");
+  expect(output).toContain("blocked");
+  expect(await herdr.calls()).not.toContain("workspace close");
+});
+
+async function retireFailsClosed(fixture: Awaited<ReturnType<typeof desk>>, name: string, args: string[], message: string) {
+  const herdr = await fakeHerdr(fixture.root, [
+    { id: "wPrimary", label: "demo", path: fixture.repository },
+    { id: "wDriver", label: `driver.${name}@demo`, path: join(fixture.worktrees, name) },
+  ]);
+  const environment = { ...herdr.environment, HERDR_SESSION: "chosen" };
+  const result = await spawnCli(fixture.site, environment, args);
+  expect(result.code).not.toBe(0);
+  expect(result.stderr).toContain(message);
+  expect((await stat(join(fixture.worktrees, name))).isDirectory()).toBe(true);
+  expect(await run(fixture.site, environment, "open", `driver.${name}@demo`)).not.toContain("retired:");
+  expect(await herdr.calls()).not.toContain("workspace close");
+}
+
+test("guard: seat retire fails closed for unfinished work or a non-coordinator actor", async () => {
+  const fixture = await desk(["partial", "other"]);
+  await finishTask(fixture.site, fixture.clean, "driver.partial@demo", "W-first");
+  await assign(fixture, "driver.partial@demo", "W-second", "start");
+  await retireFailsClosed(fixture, "partial", ["seat", "retire", "driver.partial@demo", "--by", fixture.coordinator], "unfinished tasks: W-second");
+  await finishTask(fixture.site, fixture.clean, "driver.other@demo", "W-other");
+  await retireFailsClosed(fixture, "other", ["seat", "retire", "driver.other@demo", "--by", "driver.partial@demo"], "may retire it");
+});
+
+test("guard: seat retire and task done --retire-assignee fail closed on a dirty worktree", async () => {
+  const fixture = await desk(["dirty", "dirtydone"]);
+  await finishTask(fixture.site, fixture.clean, "driver.dirty@demo", "W-dirty");
+  await writeFile(join(fixture.worktrees, "dirty", "uncommitted.txt"), "work in progress\n");
+  await retireFailsClosed(fixture, "dirty", ["seat", "retire", "driver.dirty@demo", "--by", fixture.coordinator], "worktree is dirty");
+  await writeFile(join(fixture.worktrees, "dirtydone", "uncommitted.txt"), "work in progress\n");
+  await run(fixture.site, fixture.clean, "task", "add", "demo", "W-dirtydone", "--title", "Dirty", "--coordinator", fixture.coordinator, "--assignee", "driver.dirtydone@demo", "--done-when", "Delivered.");
+  await run(fixture.site, fixture.clean, "task", "start", "demo", "W-dirtydone", "--by", "driver.dirtydone@demo");
+  await run(fixture.site, fixture.clean, "task", "prove", "demo", "W-dirtydone", "--by", "driver.dirtydone@demo", "--item", "1", "--proof", "local");
+  await run(fixture.site, fixture.clean, "task", "review", "demo", "W-dirtydone", "--by", "driver.dirtydone@demo");
+  await retireFailsClosed(fixture, "dirtydone", ["task", "done", "demo", "W-dirtydone", "--by", fixture.coordinator, "--retire-assignee"], "worktree is dirty");
+  expect(await run(fixture.site, fixture.clean, "task", "open", "demo", "W-dirtydone")).toContain("status: review");
+});
+
+test("guard: seat retire fails closed on an unmerged delivery branch", async () => {
+  const fixture = await desk(["unmerged"]);
+  const worktree = join(fixture.worktrees, "unmerged");
+  await writeFile(join(worktree, "feature.txt"), "unmerged\n");
+  await git(worktree, "add", "feature.txt");
+  await git(worktree, "commit", "-m", "unmerged work");
+  await finishTask(fixture.site, fixture.clean, "driver.unmerged@demo", "W-unmerged");
+  await retireFailsClosed(fixture, "unmerged", ["seat", "retire", "driver.unmerged@demo", "--by", fixture.coordinator], "is not merged");
+  expect(await git(fixture.repository, "branch", "--list", "delivery/unmerged")).toContain("delivery/unmerged");
+});

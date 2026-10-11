@@ -142,13 +142,21 @@ async function governedBase(root: string, projectName: string, coordinatorAddres
 }
 
 async function retireAssignee(root: string, projectName: string, id: string, task: Task) {
-  const assignee = required(task.assignee, `an assignee for task ${id}`);
+  return retireDriver(root, projectName, required(task.assignee, `an assignee for task ${id}`), id);
+}
+
+/**
+ * Retires an idle driver: every other assigned task must be done, ATDD Bun removes the clean and
+ * merged worktree, the seat records retirement and a checkpoint, then its workspace may close.
+ */
+async function retireDriver(root: string, projectName: string, assignee: string, id: string) {
   const unfinished = (await allTasks(root, projectName))
     .filter((entry) => entry.id !== id && entry.task.assignee === assignee && entry.task.status !== "done")
     .map((entry) => entry.id);
   if (unfinished.length) throw new Error(`Cannot retire ${assignee}; it still owns unfinished tasks: ${unfinished.join(", ")}.`);
 
   const owner = await seat(root, assignee);
+  if (owner.retired) throw new Error(`Seat ${assignee} is already retired.`);
   try {
     const summary = await runOutput(["atdd-bun", "worktree", "finish", "--delete-branch"], owner.worktree);
     owner.retired = { task: `${projectName}/${id}`, completed_at: now(), summary };
@@ -170,6 +178,26 @@ async function retireAssignee(root: string, projectName: string, id: string, tas
     await atomicYaml(paths(root).checkpointFile(assignee), checkpoint);
     throw error;
   }
+  const { closeRetiredDriverWorkspace } = await import("./multiplexer");
+  await closeRetiredDriverWorkspace(root, owner);
+}
+
+/** Retires a driver whose assigned tasks are all already done. */
+export async function retireSeat(root: string, address: string, args: string[]) {
+  const resolved = await canonicalAddress(root, address);
+  const actor = await canonicalAddress(root, required(words(args, "--by"), "--by"));
+  const owner = await seat(root, resolved);
+  if (owner.role !== "driver") throw new Error(`Only driver seats can be retired; ${resolved} is ${owner.role}.`);
+  if (owner.retired) throw new Error(`Seat ${resolved} is already retired.`);
+  const owned = (await allTasks(root, owner.project)).filter((entry) => entry.task.assignee === resolved);
+  if (!owned.length) throw new Error(`Cannot retire ${resolved}; it has no assigned tasks.`);
+  const unfinished = owned.filter((entry) => entry.task.status !== "done").map((entry) => entry.id);
+  if (unfinished.length) throw new Error(`Cannot retire ${resolved}; it still owns unfinished tasks: ${unfinished.join(", ")}.`);
+  if (actor !== `main@${owner.project}` && owned.some((entry) => entry.task.coordinator !== actor)) {
+    throw new Error(`Only main@${owner.project} or the coordinator of every task assigned to ${resolved} may retire it.`);
+  }
+  await retireDriver(root, owner.project, resolved, owned.at(-1)!.id);
+  console.log(`${resolved}  retired`);
 }
 
 export async function add(root: string, projectName: string, id: string, args: string[]) {
