@@ -148,3 +148,56 @@ test("RED: assigned drivers record the exact task-coordinator base and reject mi
   expect(await fail(site, "task", "add", "demo", "mismatch", "--title", "Mismatch", "--coordinator", "coordinator.payments@demo", "--assignee", "driver.mismatch-driver@demo", "--done-when", "Must refuse.")).toContain("not based on the exact coordinator head");
   expect(await fail(site, "spawn", "demo", "coordinator", "nested.stream")).toContain("single stream");
 }, 20_000);
+
+test("RED: task-aware driver spawn must atomically derive from its exact task coordinator", async () => {
+  const root = await mkdtemp(join(tmpdir(), "atdd-task-aware-driver-spawn-"));
+  roots.push(root);
+  const site = join(root, "desk");
+  const repository = join(root, "repository");
+  const worktrees = join(root, "worktrees");
+  await mkdir(repository);
+  await git(repository, "init", "--initial-branch=main");
+  await writeFile(join(repository, "README.md"), "fixture\n");
+  await git(repository, "add", "README.md");
+  await git(repository, "-c", "user.email=fixture@example.test", "-c", "user.name=Fixture", "commit", "-m", "initial");
+  await run(root, "init", site);
+  await run(site, "project", "init", "demo");
+  const projectFile = join(site, "work", "demo", "project.yaml");
+  const project = Bun.YAML.parse(await Bun.file(projectFile).text()) as Record<string, unknown>;
+  project.repository = repository;
+  project.worktree_root = worktrees;
+  await Bun.write(projectFile, Bun.YAML.stringify(project));
+  await run(site, "spawn", "demo", "main", "primary");
+  await run(site, "spawn", "demo", "coordinator", "payments");
+  const integration = join(worktrees, "payments");
+  await writeFile(join(integration, "INTEGRATION.md"), "integration head\n");
+  await git(integration, "add", "INTEGRATION.md");
+  await git(integration, "-c", "user.email=fixture@example.test", "-c", "user.name=Fixture", "commit", "-m", "integration");
+  const integrationHead = await git(integration, "rev-parse", "HEAD");
+
+  await run(site, "spawn", "demo", "driver", "ordinary");
+  expect(await git(join(worktrees, "ordinary"), "rev-parse", "HEAD")).toBe(await git(repository, "rev-parse", "main"));
+  expect(await git(join(worktrees, "ordinary"), "rev-parse", "HEAD")).not.toBe(integrationHead);
+
+  await run(site, "task", "add", "demo", "child", "--title", "Child", "--coordinator", "coordinator.payments@demo", "--done-when", "Deliver from the exact stream head.");
+  expect(await run(site, "spawn", "demo", "driver", "child", "--task", "child")).toBe("driver.child@demo  assigned child  return integration/payments");
+  const childWorktree = join(worktrees, "child");
+  expect(await git(childWorktree, "merge-base", "HEAD", "integration/payments")).toBe(integrationHead);
+  const child = await Bun.file(join(site, "work", "demo", "tasks", "child.yaml")).text();
+  expect(child).toContain("assignee: driver.child@demo");
+  expect(child).toContain("governed_base:");
+  expect(child).toContain("branch: integration/payments");
+  expect(child).toContain(`commit: ${integrationHead}`);
+
+  await git(repository, "branch", "delivery/existing", "main");
+  await run(site, "task", "add", "demo", "existing", "--title", "Existing", "--coordinator", "coordinator.payments@demo", "--done-when", "Must fail closed.");
+  expect(await fail(site, "spawn", "demo", "driver", "existing", "--task", "existing")).toContain("already exists; refusing to reuse it");
+  const existing = await Bun.file(join(site, "work", "demo", "tasks", "existing.yaml")).text();
+  expect(existing).not.toContain("assignee:");
+  expect(await Bun.file(join(worktrees, "existing")).exists()).toBe(false);
+
+  await writeFile(join(integration, "dirty.txt"), "dirty\n");
+  await run(site, "task", "add", "demo", "dirty", "--title", "Dirty", "--coordinator", "coordinator.payments@demo", "--done-when", "Must fail closed.");
+  expect(await fail(site, "spawn", "demo", "driver", "dirty", "--task", "dirty")).toContain("worktree is dirty");
+  expect((await Bun.file(join(site, "work", "demo", "tasks", "dirty.yaml")).text())).not.toContain("assignee:");
+}, 20_000);
