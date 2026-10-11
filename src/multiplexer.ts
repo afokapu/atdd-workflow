@@ -1,7 +1,7 @@
 import { readdir } from "node:fs/promises";
 import { join, resolve } from "node:path";
 import { exists, paths, project, readYaml, runOutput, type Project, type Seat } from "./core";
-import { seatTasks } from "./tasks";
+import { seatTasks, terminal } from "./tasks";
 
 export type HerdrPolicy = {
   schema: "atdd-workflow/multiplexer/herdr/v1";
@@ -158,7 +158,7 @@ async function targets(root: string, options: { strict?: string; unprojected?: U
         continue;
       }
       if (entry.role === "driver") {
-        const active = (await seatTasks(root, name, entry.address)).some(({ task }) => task.assignee === entry.address && task.status !== "done");
+        const active = (await seatTasks(root, name, entry.address)).some(({ task }) => task.assignee === entry.address && !terminal(task));
         if (active) result.push({ project: name, worktree: resolve(entry.worktree), workspaceLabel: entry.address, seat: entry });
       }
     }

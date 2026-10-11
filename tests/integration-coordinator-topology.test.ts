@@ -105,7 +105,7 @@ test("RED: legacy unscoped Herdr records report unverified without inferring ano
   expect(opened).toContain("advisory heartbeat");
 }, 20_000);
 
-test("RED: assigned drivers record the exact task-coordinator base and reject mismatch or nested streams", async () => {
+test("assigned drivers record provable task-coordinator base evidence without gating assignment", async () => {
   const root = await mkdtemp(join(tmpdir(), "atdd-integration-governed-base-"));
   roots.push(root);
   const site = join(root, "desk");
@@ -145,6 +145,8 @@ test("RED: assigned drivers record the exact task-coordinator base and reject mi
   const mismatch = join(worktrees, "mismatch-driver");
   await git(repository, "worktree", "add", "-b", "delivery/mismatch-driver", mismatch, "main");
   await run(site, "spawn", "demo", "driver", "mismatch-driver");
-  expect(await fail(site, "task", "add", "demo", "mismatch", "--title", "Mismatch", "--coordinator", "coordinator.payments@demo", "--assignee", "driver.mismatch-driver@demo", "--done-when", "Must refuse.")).toContain("not based on the exact coordinator head");
+  // Assignment is accountability only: a mismatched base is never fabricated as lineage evidence.
+  await run(site, "task", "add", "demo", "mismatch", "--title", "Mismatch", "--coordinator", "coordinator.payments@demo", "--assignee", "driver.mismatch-driver@demo", "--done-when", "Records accountability only.");
+  expect(await Bun.file(join(site, "work", "demo", "tasks", "mismatch.yaml")).text()).not.toContain("governed_base:");
   expect(await fail(site, "spawn", "demo", "coordinator", "nested.stream")).toContain("single stream");
 }, 20_000);
