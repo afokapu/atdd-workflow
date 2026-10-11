@@ -5,6 +5,7 @@ import { parse, stringify } from "yaml";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { clearStaleRuntimeState, clearRuntimeState, heartbeatRuntimeState, ownsRuntimeState, registerRuntimeState, runtimeOwnerToken, withOwnedRuntimeState } from "../../src/runtime-state";
 import { paths, readYaml, type Seat } from "../../src/core";
+import { directiveNotice, nextDirective } from "../../src/tasks";
 
 type Thread = { id?: unknown; participants?: unknown; subject?: unknown };
 export type Mail = { id?: unknown; from?: unknown; to?: unknown; subject?: unknown; created_at?: unknown };
@@ -316,6 +317,18 @@ export async function awaitLaunchActivation({ root, seat, piSession, herdrSessio
   throw new Error("Timed out waiting for verified Flow launch receipt and binding.");
 }
 
+/** Injects the current task-derived action; failure to derive never blocks mail or startup. */
+async function sendTaskDirective(pi: ExtensionAPI, root: string, seat: string) {
+  try {
+    const directive = await nextDirective(root, seat);
+    if (!directive) return;
+    pi.sendMessage({
+      customType: "atdd-flow-next-action", content: directiveNotice(seat, directive), display: true,
+      details: { project: directive.project, task: directive.task, lifecycle: directive.lifecycle, role: directive.role, authority: "task" },
+    }, { triggerTurn: true, deliverAs: "followUp" });
+  } catch { /* The durable task remains authoritative and is re-derived at the next startup or wake. */ }
+}
+
 /** Desk mail is authoritative; the queue is a bounded delivery index and fs.watch only shortens latency. */
 export default function (pi: ExtensionAPI) {
   const root = process.env.ATDD_WORKFLOW_ROOT;
@@ -325,7 +338,9 @@ export default function (pi: ExtensionAPI) {
   pi.on("session_start", async (_event, ctx) => {
     runtime = createPiRuntime({ root, seat, deferActivation: true, deliver: async (mail, thread, path, sendIfOwned) => {
       if (!sendIfOwned) return false;
-      return sendIfOwned(() => {
+      return sendIfOwned(async () => {
+        // Task state is re-read at every wake, so queued mail cannot carry a stale action.
+        await sendTaskDirective(pi, root, seat);
         pi.sendMessage({
           customType: "atdd-flow-mail",
           content: mailNotice(typeof thread.id === "string" ? thread.id : "unknown", { ...mail, subject: typeof thread.subject === "string" ? thread.subject : undefined }),
@@ -344,6 +359,7 @@ export default function (pi: ExtensionAPI) {
       activate: async () => {
         if (!await current.activate()) return;
         pi.sendMessage({ customType: "atdd-flow-start", content: `SYSTEM: you are ${seat}. Read your durable seat and assigned work with: atdd-flow open ${seat}. Convention: ${lifecycleConventionPath}. Continue assigned in_progress work until it is review-ready or explicitly blocked.`, display: true, details: { seat, root } }, { triggerTurn: true, deliverAs: "followUp" });
+        await sendTaskDirective(pi, root, seat);
         if (ctx.hasUI) ctx.ui.notify(`ATDD Flow native mail active for ${seat}`, "info");
       },
     }).catch(() => undefined);

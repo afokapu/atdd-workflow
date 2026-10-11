@@ -1,7 +1,7 @@
 import { readdir } from "node:fs/promises";
 import { resolve } from "node:path";
 import {
-  type Checkpoint, atomicYaml, canonicalAddress, now, paths, project, readYaml, required, runOutput, seat, taskId, values, words,
+  type Checkpoint, type Seat, atomicYaml, canonicalAddress, now, paths, project, readYaml, required, runOutput, seat, taskId, values, words,
 } from "./core";
 
 export type TaskStatus = "todo" | "in_progress" | "review" | "done";
@@ -497,4 +497,84 @@ export async function list(root: string, projectName: string, args: string[]) {
 
 export async function open(root: string, projectName: string, id: string) {
   console.log(Bun.YAML.stringify(await readTask(root, projectName, taskId(id))));
+}
+
+export type TaskDirective = {
+  project: string;
+  task: string;
+  lifecycle: "TODO" | "PLAN" | "RED" | "GREEN" | "REFACTOR" | "REVIEW" | "DONE" | "BLOCKED";
+  role: "assignee" | "coordinator";
+  action: string;
+  command?: string;
+};
+
+const phaseActions: Record<TaskPhase, string> = {
+  plan: "Prepare and submit PLAN handoff",
+  red: "Commit focused test-only RED handoff",
+  green: "Implement the accepted GREEN scope",
+  refactor: "Refactor only after GREEN acceptance, then submit the REFACTOR handoff",
+};
+
+/** Pure projection of an existing task record; it creates no durable state. */
+async function directiveFor(root: string, projectName: string, id: string, task: Task, address: string): Promise<TaskDirective | undefined> {
+  const base = { project: projectName, task: id };
+  if (task.assignee === address) {
+    const as = { ...base, role: "assignee" as const };
+    if (task.status === "done") return { ...as, lifecycle: "DONE", action: "Perform DONE housekeeping only; start no new implementation." };
+    if (task.blocker) return { ...as, lifecycle: "BLOCKED", action: `Remain blocked and await coordinator resolution (${task.blocker}). Continue only independent required work.` };
+    if (task.status === "review") return { ...as, lifecycle: "REVIEW", action: "Await coordinator review; do not continue implementation." };
+    if (task.status === "todo") {
+      const waiting = await ready(root, projectName, task);
+      return waiting.length
+        ? { ...as, lifecycle: "TODO", action: `Wait; dependencies are unfinished: ${waiting.join(", ")}.` }
+        : { ...as, lifecycle: "TODO", action: "Start assigned ready task.", command: `atdd-flow task start ${projectName} ${id} --by ${address}` };
+    }
+    const current = task.phase ?? "plan";
+    const lifecycle = current.toUpperCase() as TaskDirective["lifecycle"];
+    if (task.handoff?.state === "awaiting_coordinator") return { ...as, lifecycle, action: `Await coordinator response to the ${lifecycle} handoff; do not continue to the next phase.` };
+    return {
+      ...as, lifecycle, action: `${phaseActions[current]}.`,
+      command: `atdd-flow task handoff ${projectName} ${id} --by ${address} --phase ${current} --evidence <message-or-reference>`,
+    };
+  }
+  if (task.coordinator === address && task.status !== "done") {
+    const as = { ...base, role: "coordinator" as const };
+    if (task.blocker) return { ...as, lifecycle: "BLOCKED", action: `Resolve the blocker (${task.blocker}) and then unblock the task.`, command: `atdd-flow task unblock ${projectName} ${id} --by ${address}` };
+    if (task.status === "review") return { ...as, lifecycle: "REVIEW", action: "Review the submitted task; complete it or return it to work.", command: `atdd-flow task open ${projectName} ${id}` };
+    if (task.status === "in_progress" && task.handoff?.state === "awaiting_coordinator") {
+      const current = task.phase ?? "plan";
+      return { ...as, lifecycle: current.toUpperCase() as TaskDirective["lifecycle"], action: `Accept or return the ${current.toUpperCase()} handoff.`, command: `atdd-flow task respond ${projectName} ${id} --by ${address} --outcome <accept|return> --phase <plan|red|green|refactor>` };
+    }
+  }
+  return undefined;
+}
+
+const directiveRank = (directive: TaskDirective, task: Task) =>
+  directive.lifecycle === "DONE" ? 4 : directive.lifecycle === "BLOCKED" ? 3 : task.status === "todo" ? 2 : task.status === "review" ? 1 : 0;
+
+/**
+ * Derives the one next required action for an address from authoritative task
+ * records. Mail is intentionally not an input, and nothing is persisted.
+ */
+export async function nextDirective(root: string, address: string): Promise<TaskDirective | undefined> {
+  const owner = await readYaml<Seat>(paths(root).seatFile(address));
+  if (owner.retired) return undefined;
+  const entries = await seatTasks(root, owner.project, address);
+  const candidates: { directive: TaskDirective; task: Task }[] = [];
+  for (const entry of entries) {
+    const directive = await directiveFor(root, owner.project, entry.id, entry.task, address);
+    if (directive) candidates.push({ directive, task: entry.task });
+  }
+  const best = (role: "assignee" | "coordinator") => {
+    const pool = candidates.filter((entry) => entry.directive.role === role)
+      .sort((left, right) => directiveRank(left.directive, left.task) - directiveRank(right.directive, right.task));
+    // Completed housekeeping names the most recent completed task, not the oldest.
+    return pool[0] && directiveRank(pool[0].directive, pool[0].task) === 4 ? pool.at(-1) : pool[0];
+  };
+  return (best("assignee") ?? best("coordinator"))?.directive;
+}
+
+/** Compact wake text; task state is named as the authority over any mail. */
+export function directiveNotice(address: string, directive: TaskDirective) {
+  return `SYSTEM: authoritative next action for ${address} on ${directive.project}/${directive.task} [${directive.lifecycle}] from task state: ${directive.action}${directive.command ? ` Command: ${directive.command}.` : ""} Task state outranks mail; mail is notification only.`;
 }
