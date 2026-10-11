@@ -3,3 +3,9 @@
 ratchet:
   mode: reject-new
   profiles: [flow]
+# Linked delivery worktrees live beside the primary checkout; `atdd-bun worktree finish` performs
+# convention-compliant driver retirement (clean + merged into main) for `task done --retire-assignee`.
+worktrees:
+  enabled: true
+  root: ../worktrees/{repo}
+  primary_branch: main
