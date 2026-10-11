@@ -1,4 +1,4 @@
-import { existsSync } from "node:fs";
+import { existsSync, realpathSync } from "node:fs";
 import { mkdir, readdir, readFile, writeFile } from "node:fs/promises";
 import { createHash } from "node:crypto";
 import { basename, dirname, join, resolve } from "node:path";
@@ -10,7 +10,7 @@ import {
 } from "./core";
 import { type ModelSelectionInput, type ModelSelectionResponse, selectModel } from "./judgment";
 import { seatTasks } from "./tasks";
-import { projectHerdrSeat } from "./multiplexer";
+import { misplacedSeats, projectHerdrSeat } from "./multiplexer";
 import { isRuntimeStateStale, readRuntimeState } from "./runtime-state";
 import { resolveExactSessionAdoptionAuthorization } from "./adoption-authorizations";
 
@@ -66,6 +66,35 @@ export async function initProject(root: string, name: string) {
   await mkdir(paths(root).seats(name), { recursive: true });
   await atomicYaml(paths(root).projectFile(name), config);
   console.log(`Initialized project ${name}`);
+}
+
+const configureUsage = "Use `atdd-flow project configure <project> [--repository <primary-checkout>] [--worktree-root <directory>]`.";
+
+/**
+ * The supported way to declare an existing project's primary checkout and linked-worktree root.
+ * Everything is validated before one atomic write; only those two project fields change.
+ */
+export async function configureProject(root: string, name: string, args: string[]) {
+  const config = await project(root, name);
+  const values = new Map<string, string>();
+  for (let index = 0; index < args.length; index += 2) {
+    const flag = args[index], value = args[index + 1];
+    if (!["--repository", "--worktree-root"].includes(flag) || values.has(flag) || !value || value.startsWith("--")) throw new Error(configureUsage);
+    values.set(flag, value);
+  }
+  if (!values.size) throw new Error(configureUsage);
+  const repository = values.get("--repository"), worktreeRoot = values.get("--worktree-root");
+  if (repository) {
+    const path = resolve(repository);
+    const real = (value: string) => { try { return realpathSync(value); } catch { return value; } };
+    const top = existsSync(path) ? Bun.spawnSync(["git", "-C", path, "rev-parse", "--show-toplevel"], { stdout: "pipe", stderr: "pipe" }) : undefined;
+    if (!top || top.exitCode !== 0 || real(top.stdout.toString().trim()) !== real(path)) throw new Error(`${path} is not the top level of a Git repository.`);
+    config.repository = path;
+  }
+  if (worktreeRoot) config.worktree_root = resolve(worktreeRoot);
+  await atomicYaml(paths(root).projectFile(name), config);
+  for (const entry of await misplacedSeats(root, name)) console.log(`unprojected  ${entry.address}: ${entry.reason}`);
+  console.log(`${name}  configured`);
 }
 
 async function ensureWorktree(config: Project, role: Role, worktree: string, branch: string) {
