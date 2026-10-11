@@ -89,6 +89,21 @@ async function projectSeats(root: string, projectName: string) {
   return seats.filter((entry): entry is Seat => Boolean(entry && entry.schema === "atdd-workflow/seat/v2" && !entry.retired));
 }
 
+export type UnprojectedSeat = { address: string; reason: string };
+
+/** Seats whose recorded placement violates the project topology; they are never projected. */
+export async function misplacedSeats(root: string, projectName: string): Promise<UnprojectedSeat[]> {
+  const config = await project(root, projectName);
+  if (!config.repository) return [];
+  const primary = resolve(config.repository);
+  const result: UnprojectedSeat[] = [];
+  for (const entry of await projectSeats(root, projectName)) {
+    try { assertNewTopologyPlacement(config, entry, primary); }
+    catch (error) { result.push({ address: entry.address, reason: (error as Error).message }); }
+  }
+  return result;
+}
+
 function assertNewTopologyPlacement(config: Project, entry: Seat, primary: string) {
   const coordinator = config.roles.coordinator;
   const namedCoordinatorDefaults = coordinator?.address === "coordinator.{name}@{project}" && coordinator.branch === "integration/{name}";
@@ -111,7 +126,11 @@ function assertNewTopologyPlacement(config: Project, entry: Seat, primary: strin
   }
 }
 
-async function targets(root: string): Promise<Target[]> {
+/**
+ * A misplaced seat is skipped and recorded in `unprojected` so it never aborts projection of other
+ * seats; requesting that seat explicitly (`strict`) still rejects.
+ */
+async function targets(root: string, options: { strict?: string; unprojected?: UnprojectedSeat[] } = {}): Promise<Target[]> {
   let projects: string[];
   try { projects = await readdir(paths(root).work); }
   catch { return []; }
@@ -124,7 +143,12 @@ async function targets(root: string): Promise<Target[]> {
     const primary = resolve(config.repository);
     result.push({ project: name, worktree: primary, workspaceLabel: name });
     for (const entry of await projectSeats(root, name)) {
-      assertNewTopologyPlacement(config, entry, primary);
+      try { assertNewTopologyPlacement(config, entry, primary); }
+      catch (error) {
+        if (entry.address === options.strict) throw error;
+        options.unprojected?.push({ address: entry.address, reason: (error as Error).message });
+        continue;
+      }
       if ((entry.role === "main" || entry.role === "coordinator" || entry.role === "operator") && resolve(entry.worktree) === primary) {
         result.push({ project: name, worktree: primary, workspaceLabel: name, seat: entry });
         continue;
@@ -166,8 +190,16 @@ async function liveWorkspaces(session: string, command: HerdrCommand) {
   return value.workspaces as Workspace[];
 }
 
+/** A live workspace without a checkout path never matches: resolve("") would be the process cwd. */
+function matchWorkspace(workspaces: Workspace[], worktree: string) {
+  return workspaces.find((entry) => {
+    const checkout = entry.worktree?.checkout_path;
+    return typeof checkout === "string" && checkout !== "" && resolve(checkout) === worktree;
+  });
+}
+
 async function ensureWorkspace(session: string, target: Target, workspaces: Workspace[], command: HerdrCommand, primary?: WorkspaceState) {
-  let current = workspaces.find((entry) => resolve(entry.worktree?.checkout_path ?? "") === target.worktree);
+  let current = matchWorkspace(workspaces, target.worktree);
   if (!current) {
     const args = target.workspaceLabel === target.project
       ? ["workspace", "create", "--cwd", target.worktree, "--label", target.workspaceLabel, "--no-focus"]
@@ -229,7 +261,7 @@ async function ensureTarget(session: string, target: Target, workspaces: Workspa
 /** Reconciles exactly one Desk seat into a labeled Herdr workspace/tab/pane. */
 export async function projectHerdrSeat(root: string, address: string, session: string, command: HerdrCommand = herdr): Promise<HerdrSeatProjection> {
   await herdrPolicy();
-  const desired = await targets(root);
+  const desired = await targets(root, { strict: address });
   const target = desired.find((entry) => entry.seat?.address === address);
   if (!target?.seat) throw new Error(`No active Desk projection target exists for ${address}.`);
   const primaryTarget = desired.find((entry) => entry.project === target.project && entry.workspaceLabel === target.project && !entry.seat);
@@ -260,16 +292,17 @@ export async function multiplexer(root: string, args: string[]) {
     console.log("No Herdr session selected; projection was not run.");
     return;
   }
-  const desired = await targets(root);
+  const unprojected: UnprojectedSeat[] = [];
+  const desired = await targets(root, { unprojected });
   const command: HerdrCommand = herdr;
   const workspaces = await liveWorkspaces(session, command);
   if (action === "status") {
-    const present = desired.filter((target) => workspaces.some((entry) => resolve(entry.worktree?.checkout_path ?? "") === target.worktree));
+    const present = desired.filter((target) => matchWorkspace(workspaces, target.worktree));
     const topology = await Promise.all(desired.map(async (target) => {
-      const workspace = workspaces.find((entry) => resolve(entry.worktree?.checkout_path ?? "") === target.worktree);
+      const workspace = matchWorkspace(workspaces, target.worktree);
       return workspace ? topologyCompliant(session, target, workspace, command) : false;
     }));
-    console.log(JSON.stringify({ schema: "atdd-workflow/multiplexer-status/v1", application: "herdr", session, desired: desired.length, present: present.length, topology_compliant: topology.filter(Boolean).length }, null, 2));
+    console.log(JSON.stringify({ schema: "atdd-workflow/multiplexer-status/v1", application: "herdr", session, desired: desired.length, present: present.length, topology_compliant: topology.filter(Boolean).length, unprojected }, null, 2));
     return;
   }
   const primary = new Map<string, WorkspaceState>();
@@ -283,5 +316,6 @@ export async function multiplexer(root: string, args: string[]) {
     }
     await ensureTarget(session, target, workspaces, command, projectPrimary);
   }
+  for (const entry of unprojected) console.log(`unprojected  ${entry.address}: ${entry.reason}`);
   console.log(`Projected ${desired.length} Desk seat worktree(s) into Herdr session ${session}.`);
 }

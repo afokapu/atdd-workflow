@@ -1,7 +1,7 @@
 schema: atdd-workflow/project/v1
-project: resolver-os
-repository: /Users/alecfokapu/Github/resolver-os
-worktree_root: /Users/alecfokapu/Github/.worktrees/resolver-os
+project: example-app
+repository: /Users/you/Github/example-app
+worktree_root: /Users/you/Github/worktrees/example-app
 roles:
   coordinator:
     address: coordinator@{project}
@@ -13,7 +13,7 @@ roles:
     base: main
     worktree: "{worktree_root}/{name}"
 groups:
-  coordinators@resolver-os:
+  coordinators@example-app:
     role: coordinator
-  drivers@resolver-os:
+  drivers@example-app:
     role: driver

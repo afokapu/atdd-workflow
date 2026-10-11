@@ -534,19 +534,19 @@ test("a legacy alias resolves to one canonical seat", async () => {
   roots.push(root);
   const site = join(root, "site");
   await run(root, "init", site);
-  await run(site, "project", "init", "decision-os");
-  await run(site, "spawn", "decision-os", "coordinator", "main", "--worktree", "/tmp/decision-os-main");
+  await run(site, "project", "init", "example-app");
+  await run(site, "spawn", "example-app", "coordinator", "main", "--worktree", "/tmp/example-app-main");
   await writeFile(join(site, "desk.yaml"), `schema: atdd-workflow/desk/v1
 desk: site
 application: herdr
 aliases:
-  coordinator@DOS-jev: coordinator@decision-os
+  coordinator@legacy-stream: coordinator@example-app
 `);
 
-  await run(site, "checkpoint", "coordinator@DOS-jev", "--status", "unverified", "--summary", "Recovered through the old address.", "--next", "Reconcile current owner.");
-  const opened = await run(site, "open", "coordinator@decision-os");
+  await run(site, "checkpoint", "coordinator@legacy-stream", "--status", "unverified", "--summary", "Recovered through the old address.", "--next", "Reconcile current owner.");
+  const opened = await run(site, "open", "coordinator@example-app");
   expect(opened).toContain("Recovered through the old address.");
-  expect(opened).toContain("coordinator@decision-os");
+  expect(opened).toContain("coordinator@example-app");
 });
 
 test("a seat retains native addresses and can switch its active application", async () => {

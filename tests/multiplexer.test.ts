@@ -1,5 +1,5 @@
 import { afterEach, expect, test } from "bun:test";
-import { chmod, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { chmod, mkdir, mkdtemp, readFile, realpath, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { herdrPolicy, projectHerdrSeat } from "../src/multiplexer";
@@ -19,7 +19,8 @@ async function run(cwd: string, ...args: string[]) {
 }
 
 async function desk() {
-  const root = await mkdtemp(join(tmpdir(), "atdd-multiplexer-"));
+  // Canonical path: the process cwd of a child spawned here is reported without symlinks.
+  const root = await realpath(await mkdtemp(join(tmpdir(), "atdd-multiplexer-")));
   roots.push(root);
   const site = join(root, "desk");
   const repository = join(root, "repo");
@@ -74,14 +75,14 @@ branch: delivery/active
   return { root, site, repository, integration, driver };
 }
 
-async function fakeHerdr(root: string) {
+async function fakeHerdr(root: string, liveWorkspaces = "[]") {
   const bin = join(root, "bin");
   const log = join(root, "herdr.log");
   await mkdir(bin);
   await writeFile(join(bin, "herdr"), `#!/bin/sh
 printf '%s\\n' "$*" >> '${log}'
 case "$3:$4" in
-  workspace:list) printf '%s' '{"result":{"workspaces":[]}}' ;;
+  workspace:list) printf '%s' '{"result":{"workspaces":${liveWorkspaces}}}' ;;
   workspace:create) printf '%s' '{"result":{"workspace":{"workspace_id":"w1"}}}' ;;
   worktree:open) printf '%s' '{"result":{"workspace":{"workspace_id":"w2"},"root_tab":{"tab_id":"w2:t1"},"root_pane":{"pane_id":"w2:p1"}}}' ;;
   tab:list) printf '%s' '{"result":{"tabs":[]}}' ;;
@@ -124,7 +125,7 @@ test("RED: Herdr 0.9.3 linked opens use one primary anchor plus an explicit work
   expect(calls).toContain("--session chosen workspace create --cwd " + fixture.repository + " --label demo --no-focus");
   // Herdr 0.9.3 requires an explicit path-or-branch selector. Its linked
   // worktree open may use exactly one primary anchor; do not combine --cwd
-  // with the primary workspace selector (real Bun/DOS dry-runs rejected it).
+  // with the primary workspace selector (real dry-runs rejected it).
   expect(calls).toContain("--session chosen worktree open --workspace w1 --path " + fixture.integration + " --label coordinator.integration@demo --no-focus");
   expect(calls).toContain("--session chosen worktree open --workspace w1 --path " + fixture.driver + " --label driver.active@demo --no-focus");
   expect(calls).not.toContain("worktree open --workspace w1 --cwd");
@@ -187,4 +188,52 @@ branch: main
   expect(await projectHerdrSeat(fixture.site, "coordinator.primary@demo", "chosen", command)).toMatchObject({ label: "coordinator.primary@demo" });
   expect(await projectHerdrSeat(fixture.site, "operator@demo", "chosen", command)).toMatchObject({ label: "operator@demo" });
   await expect(projectHerdrSeat(fixture.site, "reviewer.primary@demo", "chosen", command)).rejects.toThrow("No active Desk projection target");
+});
+
+async function misplace(site: string, stale: string) {
+  // A seat recorded before the topology existed: role main, but not the primary main identity/worktree.
+  await mkdir(stale);
+  await mkdir(join(site, "work", "demo", "seats", "main.legacy"), { recursive: true });
+  await writeFile(join(site, "work", "demo", "seats", "main.legacy", "seat.yaml"), `schema: atdd-workflow/seat/v2
+address: main.legacy@demo
+role: main
+project: demo
+worktree: ${stale}
+branch: main
+`);
+}
+
+test("RED: multiplexer status reports a misplaced seat as unprojected instead of aborting every projection", async () => {
+  const fixture = await desk();
+  const fake = await fakeHerdr(fixture.root);
+  await misplace(fixture.site, join(fixture.root, "stale"));
+  const output = await invoke(fixture.site, fake.environment, "multiplexer", "status", "herdr", "--session", "chosen");
+  const status = JSON.parse(output);
+  expect(status).toMatchObject({ schema: "atdd-workflow/multiplexer-status/v1", desired: 5 });
+  expect(status.unprojected).toEqual([expect.objectContaining({ address: "main.legacy@demo" })]);
+});
+
+test("RED: multiplexer apply projects every other seat and reports the misplaced seat", async () => {
+  const fixture = await desk();
+  const fake = await fakeHerdr(fixture.root);
+  await misplace(fixture.site, join(fixture.root, "stale"));
+  const output = await invoke(fixture.site, fake.environment, "multiplexer", "apply", "herdr", "--session", "chosen");
+  expect(output).toContain("unprojected  main.legacy@demo");
+  const calls = await readFile(fake.log, "utf8");
+  expect(calls).toContain("--label driver.active@demo");
+  expect(calls).toContain("--label coordinator.integration@demo");
+  expect(calls).not.toContain("main.legacy@demo");
+});
+
+test("RED: a live workspace without a checkout path never matches a projection target", async () => {
+  const fixture = await desk();
+  const fake = await fakeHerdr(fixture.root, '[{"workspace_id":"wx","label":"scratch"}]');
+  // resolve("") is the process cwd; running from the primary checkout must not adopt the unrelated workspace.
+  const status = JSON.parse(await invoke(fixture.repository, fake.environment, "--root", fixture.site, "multiplexer", "status", "herdr", "--session", "chosen"));
+  expect(status).toMatchObject({ present: 0, topology_compliant: 0 });
+  await invoke(fixture.repository, fake.environment, "--root", fixture.site, "multiplexer", "apply", "herdr", "--session", "chosen");
+  const calls = await readFile(fake.log, "utf8");
+  expect(calls).toContain("--session chosen workspace create --cwd " + fixture.repository + " --label demo --no-focus");
+  expect(calls).not.toContain("workspace rename wx");
+  expect(calls).not.toContain("--workspace wx");
 });
