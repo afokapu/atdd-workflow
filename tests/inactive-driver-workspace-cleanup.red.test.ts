@@ -1,0 +1,183 @@
+import { afterEach, expect, test as bunTest } from "bun:test";
+import { chmod, mkdir, mkdtemp, readFile, rm, stat, symlink, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { parse, stringify } from "yaml";
+
+/**
+ * RED contract for closing inactive driver workspaces. Every fixture lives
+ * below mkdtemp and talks to a fake `herdr` executable that only logs calls,
+ * so no real multiplexer session is touched.
+ */
+const roots: string[] = [];
+const cli = join(import.meta.dir, "..", "src", "cli.ts");
+const test = (name: string, body: () => unknown | Promise<unknown>) => bunTest(name, body, 30_000);
+
+afterEach(async () => { await Promise.all(roots.splice(0).map((root) => rm(root, { recursive: true, force: true }))); });
+
+async function spawnCli(cwd: string, environment: Record<string, string | undefined>, args: string[]) {
+  const child = Bun.spawn([process.execPath, cli, ...args], { cwd, env: environment, stdout: "pipe", stderr: "pipe" });
+  const [stdout, stderr, code] = await Promise.all([new Response(child.stdout).text(), new Response(child.stderr).text(), child.exited]);
+  return { stdout: stdout.trim(), stderr: stderr.trim(), code };
+}
+
+async function run(cwd: string, environment: Record<string, string | undefined>, ...args: string[]) {
+  const result = await spawnCli(cwd, environment, args);
+  expect(result.code, result.stderr).toBe(0);
+  return result.stdout;
+}
+
+async function git(cwd: string, ...args: string[]) {
+  const child = Bun.spawn(["git", ...args], { cwd, stdout: "pipe", stderr: "pipe" });
+  const [stdout, stderr, code] = await Promise.all([new Response(child.stdout).text(), new Response(child.stderr).text(), child.exited]);
+  expect(code, stderr).toBe(0);
+  return stdout.trim();
+}
+
+type Workspace = { id: string; label: string; path: string; agent?: "idle" | "working" | "blocked" };
+
+/** A fake Herdr that reports fixed workspaces/panes and logs every invocation. */
+async function fakeHerdr(root: string, workspaces: Workspace[]) {
+  const bin = join(root, "bin");
+  const log = join(root, "herdr.log");
+  await mkdir(bin, { recursive: true });
+  const listed = JSON.stringify({ result: { workspaces: workspaces.map((entry) => ({ workspace_id: entry.id, label: entry.label, worktree: { checkout_path: entry.path } })) } });
+  const paneCases = workspaces.map((entry) => `  pane:list:${entry.id}) printf '%s' '${JSON.stringify({ result: { panes: [{ pane_id: `${entry.id}:p1`, tab_id: `${entry.id}:t1`, workspace_id: entry.id, label: entry.label, agent: "pi", agent_status: entry.agent ?? "idle" }] } })}' ;;`).join("\n");
+  await writeFile(join(bin, "herdr"), `#!/bin/sh
+printf '%s\\n' "$*" >> '${log}'
+case "$3:$4:$6" in
+  workspace:list:*) printf '%s' '${listed}' ;;
+${paneCases}
+  pane:list:*) printf '%s' '{"result":{"panes":[]}}' ;;
+  tab:list:*) printf '%s' '{"result":{"tabs":[]}}' ;;
+  workspace:create:*) printf '%s' '{"result":{"workspace":{"workspace_id":"wNew"},"root_tab":{"tab_id":"wNew:t1"},"root_pane":{"pane_id":"wNew:p1"}}}' ;;
+  worktree:open:*) printf '%s' '{"result":{"workspace":{"workspace_id":"wOpen"},"root_tab":{"tab_id":"wOpen:t1"},"root_pane":{"pane_id":"wOpen:p1"}}}' ;;
+  tab:create:*) printf '%s' '{"result":{"tab":{"tab_id":"wTab:t1"},"root_pane":{"pane_id":"wTab:p1"}}}' ;;
+  *) printf '%s' '{"result":{}}' ;;
+esac
+`);
+  await chmod(join(bin, "herdr"), 0o755);
+  const environment = { ...process.env, ATDD_WORKFLOW_ROOT: undefined, ATDD_WORKFLOW_SEAT: undefined, HERDR_SESSION: undefined, HERDR_PANE_ID: undefined, PATH: `${bin}:${process.env.PATH ?? ""}` };
+  return { log, environment, calls: async () => await Bun.file(log).exists() ? readFile(log, "utf8") : "" };
+}
+
+/** A real repository with ATDD Bun linked-worktree policy and a Desk that spawns linked driver worktrees. */
+async function desk(drivers: string[]) {
+  const root = await mkdtemp(join(tmpdir(), "atdd-inactive-cleanup-"));
+  roots.push(root);
+  const repository = join(root, "repository");
+  const worktrees = join(root, "worktrees");
+  const site = join(root, "site");
+  const clean = { ...process.env, ATDD_WORKFLOW_ROOT: undefined, ATDD_WORKFLOW_SEAT: undefined, HERDR_SESSION: undefined, HERDR_PANE_ID: undefined };
+  await git(root, "init", "-b", "main", repository);
+  await git(repository, "config", "user.email", "test@example.test");
+  await git(repository, "config", "user.name", "Test");
+  await writeFile(join(repository, ".gitignore"), "node_modules/\n");
+  await writeFile(join(repository, "atdd-bun.yaml"), "worktrees:\n  enabled: true\n  root: ../worktrees\n  primary_directory: repository\n  primary_branch: main\n  require_linked_worktree: true\n");
+  await git(repository, "add", ".gitignore", "atdd-bun.yaml");
+  await git(repository, "commit", "-m", "configure worktrees");
+  await run(root, clean, "init", site);
+  await run(site, clean, "project", "init", "demo");
+  await writeFile(join(site, "work", "demo", "project.yaml"), `schema: atdd-workflow/project/v1
+project: demo
+repository: ${repository}
+worktree_root: ${worktrees}
+roles:
+  coordinator:
+    address: coordinator@{project}
+    branch: main
+    agent: codex
+    worktree: "{repository}"
+  driver:
+    address: driver.{name}@{project}
+    branch: delivery/{name}
+    base: main
+    agent: codex
+    worktree: "{worktree_root}/{name}"
+`);
+  const deskFile = join(site, "desk.yaml");
+  await writeFile(deskFile, stringify({ ...parse(await readFile(deskFile, "utf8")), multiplexer: { close_inactive: true } }));
+  await run(site, clean, "spawn", "demo", "coordinator", "main");
+  for (const name of drivers) {
+    await run(site, clean, "spawn", "demo", "driver", name);
+    await mkdir(join(worktrees, name, "node_modules", ".bin"), { recursive: true });
+    await symlink(join(import.meta.dir, "..", "node_modules", ".bin", "atdd-bun"), join(worktrees, name, "node_modules", ".bin", "atdd-bun"));
+  }
+  return { root, site, repository, worktrees, clean, coordinator: "coordinator@demo" };
+}
+
+async function finishTask(site: string, environment: Record<string, string | undefined>, driver: string, id: string, ...doneFlags: string[]) {
+  await run(site, environment, "task", "add", "demo", id, "--title", `Deliver ${id}`, "--coordinator", "coordinator@demo", "--assignee", driver, "--done-when", "Delivery branch is merged.");
+  await run(site, environment, "task", "start", "demo", id, "--by", driver);
+  await run(site, environment, "task", "prove", "demo", id, "--by", driver, "--item", "1", "--proof", "main already contains the delivery branch");
+  await run(site, environment, "task", "review", "demo", id, "--by", driver);
+  await run(site, environment, "task", "done", "demo", id, "--by", "coordinator@demo", ...doneFlags);
+}
+
+/** Inactive driver (wDone), working inactive driver (wBusy), active driver, primary, operator and unrelated workspaces. */
+async function mixedSession() {
+  const fixture = await desk(["done", "busy", "active"]);
+  await finishTask(fixture.site, fixture.clean, "driver.done@demo", "W-done");
+  await finishTask(fixture.site, fixture.clean, "driver.busy@demo", "W-busy");
+  await run(fixture.site, fixture.clean, "task", "add", "demo", "W-active", "--title", "Active", "--coordinator", fixture.coordinator, "--assignee", "driver.active@demo", "--done-when", "Delivered.");
+  const herdr = await fakeHerdr(fixture.root, [
+    { id: "wPrimary", label: "demo", path: fixture.repository },
+    { id: "wDone", label: "driver.done@demo", path: join(fixture.worktrees, "done") },
+    { id: "wBusy", label: "driver.busy@demo", path: join(fixture.worktrees, "busy"), agent: "working" },
+    { id: "wActive", label: "driver.active@demo", path: join(fixture.worktrees, "active") },
+    { id: "wOperator", label: "operator@desk", path: fixture.root },
+    { id: "wScratch", label: "scratch", path: tmpdir() },
+  ]);
+  return { ...fixture, herdr };
+}
+
+test("RED: multiplexer status reports inactive driver workspaces as stale", async () => {
+  const fixture = await mixedSession();
+  const output = await run(fixture.site, fixture.herdr.environment, "multiplexer", "status", "herdr", "--session", "chosen");
+  expect(JSON.parse(output)).toMatchObject({ schema: "atdd-workflow/multiplexer-status/v1", stale: 2 });
+  expect(await fixture.herdr.calls()).not.toContain(" close");
+});
+
+test("RED: multiplexer apply closes only idle inactive driver workspaces when close_inactive is enabled", async () => {
+  const fixture = await mixedSession();
+  const output = await run(fixture.site, fixture.herdr.environment, "multiplexer", "apply", "herdr", "--session", "chosen");
+  const calls = await fixture.herdr.calls();
+  expect(calls).toContain("--session chosen workspace close wDone");
+  // A working or blocked Pi agent is reported, never closed.
+  expect(output).toContain("driver.busy@demo");
+  for (const kept of ["wBusy", "wActive", "wPrimary", "wOperator", "wScratch"]) expect(calls).not.toContain(`workspace close ${kept}`);
+});
+
+test("RED: task done --retire-assignee closes the retired driver workspace", async () => {
+  const fixture = await desk(["runtime"]);
+  const herdr = await fakeHerdr(fixture.root, [
+    { id: "wPrimary", label: "demo", path: fixture.repository },
+    { id: "wRuntime", label: "driver.runtime@demo", path: join(fixture.worktrees, "runtime") },
+  ]);
+  const environment = { ...herdr.environment, HERDR_SESSION: "chosen" };
+  await finishTask(fixture.site, environment, "driver.runtime@demo", "W-runtime", "--retire-assignee");
+  await expect(stat(join(fixture.worktrees, "runtime"))).rejects.toThrow();
+  expect(await run(fixture.site, environment, "open", "driver.runtime@demo")).toContain("retired:");
+  const calls = await herdr.calls();
+  expect(calls).toContain("--session chosen workspace close wRuntime");
+  expect(calls).not.toContain("workspace close wPrimary");
+});
+
+test("RED: an already-DONE driver can be retired by its coordinator, which also closes its workspace", async () => {
+  const fixture = await desk(["finished"]);
+  const herdr = await fakeHerdr(fixture.root, [
+    { id: "wPrimary", label: "demo", path: fixture.repository },
+    { id: "wFinished", label: "driver.finished@demo", path: join(fixture.worktrees, "finished") },
+  ]);
+  const environment = { ...herdr.environment, HERDR_SESSION: "chosen" };
+  await finishTask(fixture.site, environment, "driver.finished@demo", "W-finished");
+  await run(fixture.site, environment, "seat", "retire", "driver.finished@demo", "--by", fixture.coordinator);
+  await expect(stat(join(fixture.worktrees, "finished"))).rejects.toThrow();
+  expect(await git(fixture.repository, "branch", "--list", "delivery/finished")).toBe("");
+  const record = await run(fixture.site, environment, "open", "driver.finished@demo");
+  expect(record).toContain("retired:");
+  expect(record).toContain("status: complete");
+  const calls = await herdr.calls();
+  expect(calls).toContain("--session chosen workspace close wFinished");
+  expect(calls).not.toContain("workspace close wPrimary");
+});
