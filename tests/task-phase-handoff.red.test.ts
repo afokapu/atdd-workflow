@@ -27,7 +27,7 @@ async function fixture() {
 }
 
 async function invoke(root: string, ...args: string[]) {
-  const child = Bun.spawn([process.execPath, cli, "--root", root, ...args], { cwd: root, stdout: "pipe", stderr: "pipe" });
+  const child = Bun.spawn([process.execPath, cli, "--root", root, ...args], { cwd: root, env: { ...process.env, ATDD_WORKFLOW_ROOT: undefined, ATDD_WORKFLOW_SEAT: undefined }, stdout: "pipe", stderr: "pipe" });
   const [stdout, stderr, exitCode] = await Promise.all([new Response(child.stdout).text(), new Response(child.stderr).text(), child.exited]);
   return { output: `${stdout}${stderr}`, exitCode };
 }
