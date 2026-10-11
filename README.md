@@ -16,7 +16,7 @@ Desk (private Git repository)             Code repositories / worktrees
 - A **seat** owns responsibility, branch, worktree, checkpoint, and host addresses; a **task** owns its brief, ownership, dependencies, criteria, and proof.
 - A **thread** owns messages, receipts, results, and decisions; a **host** owns panes and notifications—never durable state.
 
-A stable address, such as `driver.runtime@resolver-os`, survives a different pane, host, model, or replacement agent. A replacement reads its durable seat, task, checkpoint, and threads rather than predecessor-private context.
+A stable address, such as `driver.runtime@example-app`, survives a different pane, host, model, or replacement agent. A replacement reads its durable seat, task, checkpoint, and threads rather than predecessor-private context.
 
 Workflow is a YAML protocol and CLI—not a database, daemon, agent runtime, or task-management SaaS. Git supplies history and replication; a multiplexer may wake an agent, but never owns state.
 
@@ -76,15 +76,25 @@ model. Final behavioral review has its own bounded routing step described below.
 
 ## Configure worktrees and seats
 
-Create a project, then set its policy in `work/<project>/project.yaml`:
+Create a project, declare its primary checkout and linked-worktree root, then adjust its policy in `work/<project>/project.yaml`:
 
 ```sh
-atdd-flow project init resolver-os
+atdd-flow project init example-app
+atdd-flow project configure example-app --repository /Users/you/Github/example-app --worktree-root /Users/you/Github/worktrees/example-app
 ```
 
+`project configure` sets only `repository` and `worktree_root`. It fails closed, leaving the project
+unchanged, when `--repository` is not the top level of a Git repository or a flag is unknown, repeated,
+or missing its value. It never changes seats, runtimes, tasks, branches, worktrees, or repository
+content; it lists each seat whose recorded placement violates the topology as `unprojected`.
+
+A misplaced seat is left unprojected: `multiplexer status` reports it under `unprojected`, and
+`multiplexer apply` and launch projection of other seats continue. Projecting that seat explicitly
+still rejects until its placement is corrected.
+
 ```yaml
-repository: /Users/you/Github/resolver-os
-worktree_root: /Users/you/Github/worktrees/resolver-os
+repository: /Users/you/Github/example-app
+worktree_root: /Users/you/Github/worktrees/example-app
 roles:
   coordinator: { address: coordinator@{project}, branch: main, worktree: '{repository}' }
   driver: { address: driver.{name}@{project}, branch: delivery/{name}, base: main, worktree: '{worktree_root}/{name}' }
@@ -93,11 +103,11 @@ roles:
 The operator or coordinator creates seats; drivers do not choose their policy:
 
 ```sh
-atdd-flow spawn resolver-os coordinator main --worktree /Users/you/Github/resolver-os
-atdd-flow spawn resolver-os driver runtime
+atdd-flow spawn example-app coordinator main --worktree /Users/you/Github/example-app
+atdd-flow spawn example-app driver runtime
 ```
 
-`spawn` creates missing driver worktrees through Git: this example creates `/Users/you/Github/worktrees/resolver-os/runtime` on `delivery/runtime`. ATDD Bun owns safe retirement, not creation. A seat can own several tasks.
+`spawn` creates missing driver worktrees through Git: this example creates `/Users/you/Github/worktrees/example-app/runtime` on `delivery/runtime`. ATDD Bun owns safe retirement, not creation. A seat can own several tasks.
 
 ## Deliver work
 
@@ -108,14 +118,14 @@ todo → in_progress → review → done
 The coordinator assigns; the driver implements, proves each criterion, and submits for review; only the coordinator marks the task done.
 
 ```sh
-atdd-flow task add resolver-os runtime-rollout --title 'Complete runtime rollout' \
-  --coordinator coordinator@resolver-os --assignee driver.runtime@resolver-os \
+atdd-flow task add example-app runtime-rollout --title 'Complete runtime rollout' \
+  --coordinator coordinator@example-app --assignee driver.runtime@example-app \
   --done-when 'Checks pass'
-atdd-flow task start resolver-os runtime-rollout --by driver.runtime@resolver-os
-atdd-flow task prove resolver-os runtime-rollout --by driver.runtime@resolver-os --item 1 --proof 'CI run 42'
-atdd-flow task review resolver-os runtime-rollout --by driver.runtime@resolver-os
+atdd-flow task start example-app runtime-rollout --by driver.runtime@example-app
+atdd-flow task prove example-app runtime-rollout --by driver.runtime@example-app --item 1 --proof 'CI run 42'
+atdd-flow task review example-app runtime-rollout --by driver.runtime@example-app
 # An independently attached reviewer persists APPROVE, RETURN, or ESCALATE through behavioral-review record
-atdd-flow task done resolver-os runtime-rollout --by coordinator@resolver-os
+atdd-flow task done example-app runtime-rollout --by coordinator@example-app
 ```
 
 Proof is a compact PR, CI run, report, commit range, deployment, or thread reference. Dependencies gate prerequisites; independent tasks are parallel-ready. A coordinator can staff an unassigned ready task with `atdd-flow task assign <project> <task-id> --assignee <address> --by <coordinator-address>`; assignment is allowed only once while the task is `todo`. Use `task block` only for a real external blocker, then checkpoint exact state and next action. Once the blocker is resolved, only that coordinator can clear it with `atdd-flow task unblock <project> <task-id> --by <coordinator-address>` while the task remains `in_progress`. For deliveries explicitly governed by the `workflow` ATDD Bun profile, `review → done` additionally requires a durable final behavioral-review result with decision `APPROVE` for the current clean delivery commit. For an idle driver’s final task, `task done ... --retire-assignee` delegates clean-and-merged worktree retirement to ATDD Bun.
@@ -127,11 +137,11 @@ For topology normalization, transfer an active task through the narrow durable c
 Threads are the durable inbox/outbox. Workflow persists a message before a best-effort host notification, so a closed pane, rate limit, or missed prompt cannot lose it.
 
 ```sh
-atdd-flow thread start --with coordinator@resolver-os,driver.runtime@resolver-os \
-  --subject 'Runtime rollout' --task resolver-os/runtime-rollout
-atdd-flow post T-... --from coordinator@resolver-os --to driver.runtime@resolver-os \
+atdd-flow thread start --with coordinator@example-app,driver.runtime@example-app \
+  --subject 'Runtime rollout' --task example-app/runtime-rollout
+atdd-flow post T-... --from coordinator@example-app --to driver.runtime@example-app \
   --label 'implementation request' --expects-result --body 'Implement the task and return proof references.'
-atdd-flow result T-... M-... --from driver.runtime@resolver-os --label 'proof returned' --body 'CI run 42; PR #81.'
+atdd-flow result T-... M-... --from driver.runtime@example-app --label 'proof returned' --body 'CI run 42; PR #81.'
 ```
 
 New durable thread and message IDs are human-readable: `T-` or `M-`, a UTC-second
@@ -149,14 +159,14 @@ For a shared boundary: driver → coordinator → affected coordinator(s) → mi
 
 ```sh
 atdd-flow status
-atdd-flow status seat driver.runtime@resolver-os
-atdd-flow open driver.runtime@resolver-os
+atdd-flow status seat driver.runtime@example-app
+atdd-flow open driver.runtime@example-app
 ```
 
 Herdr and tmux can notify an already attached host pane. Flow does not create host panes: the operator starts the agent in its declared worktree with `ATDD_WORKFLOW_ROOT` and `ATDD_WORKFLOW_SEAT`, then attaches that pane deterministically.
 
 ```sh
-atdd-flow attach driver.runtime@resolver-os --application herdr
+atdd-flow attach driver.runtime@example-app --application herdr
 ```
 
 ### Optional Herdr worktree projection
@@ -213,10 +223,10 @@ To host Pi in Herdr, create a pane with the durable Desk and seat identity, then
 PI_EXTENSION="$(atdd-flow pi extension-path)"
 herdr pane split --current --direction right --cwd /path/to/worktree --no-focus \
   --env ATDD_WORKFLOW_ROOT=/path/to/desk \
-  --env ATDD_WORKFLOW_SEAT=driver.runtime@resolver-os
+  --env ATDD_WORKFLOW_SEAT=driver.runtime@example-app
 # Use the pane id returned above.
 herdr agent start pi-runtime --kind pi --pane <pane-id> -- --extension "$PI_EXTENSION"
-atdd-flow --root /path/to/desk attach driver.runtime@resolver-os --application herdr --wake native
+atdd-flow --root /path/to/desk attach driver.runtime@example-app --application herdr --wake native
 ```
 
 Pi receives its identity and startup task from the extension itself. Its normal TUI remains visible and manually usable; incoming Desk mail wakes it through Pi's native message API. The runtime lifecycle has one internal bounded inbox transport; it does not add a second watcher, registry, mailbox, reservation system, or routing path.
@@ -265,7 +275,7 @@ Jev is read-only; it cannot mutate state, approve proof, or override ATDD Bun.
 
 ```sh
 atdd-flow scout --goal 'Fix payment retry behavior' --path src/payment/retry.ts --path src/profile/avatar.ts
-atdd-flow focus-check resolver-os runtime-rollout --action 'Add a generic retry orchestration service'
+atdd-flow focus-check example-app runtime-rollout --action 'Add a generic retry orchestration service'
 ```
 
 `scout` selects likely files. `focus-check` returns `REQUIRED`, `USEFUL_BUT_NOT_REQUIRED`, or `SPECULATIVE`.

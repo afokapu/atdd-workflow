@@ -125,7 +125,7 @@ test("RED: Herdr 0.9.3 linked opens use one primary anchor plus an explicit work
   expect(calls).toContain("--session chosen workspace create --cwd " + fixture.repository + " --label demo --no-focus");
   // Herdr 0.9.3 requires an explicit path-or-branch selector. Its linked
   // worktree open may use exactly one primary anchor; do not combine --cwd
-  // with the primary workspace selector (real Bun/DOS dry-runs rejected it).
+  // with the primary workspace selector (real dry-runs rejected it).
   expect(calls).toContain("--session chosen worktree open --workspace w1 --path " + fixture.integration + " --label coordinator.integration@demo --no-focus");
   expect(calls).toContain("--session chosen worktree open --workspace w1 --path " + fixture.driver + " --label driver.active@demo --no-focus");
   expect(calls).not.toContain("worktree open --workspace w1 --cwd");
