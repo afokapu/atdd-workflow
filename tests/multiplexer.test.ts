@@ -2,7 +2,7 @@ import { afterEach, expect, test } from "bun:test";
 import { chmod, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { herdrPolicy } from "../src/multiplexer";
+import { herdrPolicy, projectHerdrSeat } from "../src/multiplexer";
 
 const roots: string[] = [];
 const cli = join(import.meta.dir, "..", "src", "cli.ts");
@@ -157,4 +157,34 @@ test("Herdr attachment qualifies identical pane ids by their inherited session",
   const secondSeat = await readFile(join(fixture.site, "work", "demo", "seats", "driver.active", "seat.yaml"), "utf8");
   expect(secondSeat).toContain("session: two");
   expect(secondSeat).toContain("pane: w1:p1");
+});
+
+test("RED: an operator seat at the primary worktree is projected alongside main and coordinator without admitting unrelated roles", async () => {
+  const fixture = await desk();
+  const seats = join(fixture.site, "work", "demo", "seats");
+  await Promise.all(["operator", "reviewer.primary"].map((name) => mkdir(join(seats, name), { recursive: true })));
+  await writeFile(join(seats, "operator", "seat.yaml"), `schema: atdd-workflow/seat/v2
+address: operator@demo
+role: operator
+project: demo
+worktree: ${fixture.repository}
+branch: main
+`);
+  await writeFile(join(seats, "reviewer.primary", "seat.yaml"), `schema: atdd-workflow/seat/v2
+address: reviewer.primary@demo
+role: reviewer
+project: demo
+worktree: ${fixture.repository}
+branch: main
+`);
+  const fake = await fakeHerdr(fixture.root);
+  const bin = join(fixture.root, "bin", "herdr");
+  const command = async (args: string[]) => {
+    const child = Bun.spawn([bin, ...args.slice(1)], { env: fake.environment, stdout: "pipe", stderr: "pipe" });
+    return new Response(child.stdout).text();
+  };
+  expect(await projectHerdrSeat(fixture.site, "main@demo", "chosen", command)).toMatchObject({ label: "main@demo" });
+  expect(await projectHerdrSeat(fixture.site, "coordinator.primary@demo", "chosen", command)).toMatchObject({ label: "coordinator.primary@demo" });
+  expect(await projectHerdrSeat(fixture.site, "operator@demo", "chosen", command)).toMatchObject({ label: "operator@demo" });
+  await expect(projectHerdrSeat(fixture.site, "reviewer.primary@demo", "chosen", command)).rejects.toThrow("No active Desk projection target");
 });

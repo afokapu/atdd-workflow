@@ -125,7 +125,7 @@ async function targets(root: string): Promise<Target[]> {
     result.push({ project: name, worktree: primary, workspaceLabel: name });
     for (const entry of await projectSeats(root, name)) {
       assertNewTopologyPlacement(config, entry, primary);
-      if ((entry.role === "main" || entry.role === "coordinator") && resolve(entry.worktree) === primary) {
+      if ((entry.role === "main" || entry.role === "coordinator" || entry.role === "operator") && resolve(entry.worktree) === primary) {
         result.push({ project: name, worktree: primary, workspaceLabel: name, seat: entry });
         continue;
       }
